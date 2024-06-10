@@ -17,28 +17,6 @@ typedef enum
     DMBG_STOP_BP,
 } DmbgStopReason;
 
-/* Структура, представляющая регистры процессора */
-typedef struct Registers
-{
-    unsigned long long int r8;
-    unsigned long long int r9;
-    unsigned long long int r10;
-    unsigned long long int r11;
-    unsigned long long int r12;
-    unsigned long long int r13;
-    unsigned long long int r14;
-    unsigned long long int r15;
-    unsigned long long int rbp;
-    unsigned long long int rbx;
-    unsigned long long int rax;
-    unsigned long long int rcx;
-    unsigned long long int rdx;
-    unsigned long long int rsi;
-    unsigned long long int rdi;
-    unsigned long long int rip;
-    unsigned long long int rsp;
-} Registers;
-
 /*
  * Запустить указанную программу для отладки.
  *
@@ -83,6 +61,28 @@ int dmbg_wait(DumbuggerState *state);
  */
 int dmbg_continue(DumbuggerState  *state);
 
+/* Структура, представляющая регистры процессора */
+typedef struct Registers
+{
+    unsigned long long int r8;
+    unsigned long long int r9;
+    unsigned long long int r10;
+    unsigned long long int r11;
+    unsigned long long int r12;
+    unsigned long long int r13;
+    unsigned long long int r14;
+    unsigned long long int r15;
+    unsigned long long int rbp;
+    unsigned long long int rbx;
+    unsigned long long int rax;
+    unsigned long long int rcx;
+    unsigned long long int rdx;
+    unsigned long long int rsi;
+    unsigned long long int rdi;
+    unsigned long long int rip;
+    unsigned long long int rsp;
+} Registers;
+
 /* 
  * Получить регистры процессора.
  * При успешной операции, результат сохраняется в переменной *regs
@@ -94,5 +94,32 @@ int dmbg_get_regs(DumbuggerState *state, Registers *regs);
  * Скорее всего, для получения изначальных данных нужен dmbg_get_regs
  */
 int dmbg_set_regs(DumbuggerState *state, Registers *regs);
+
+/* 
+ * Структура для представления результата дизассемблирования
+ */
+typedef struct DumbuggerAssemblyDump {
+    /* 
+     * Длина массива as
+     */
+    int length;
+#define DMBG_MAX_ASSEMBLY_STR_LEN 32
+
+    /* 
+     * Массив строк дизассемблированных инструкций.
+     * Каждая строка оканчивается '\0'
+     */
+    char (*as)[DMBG_MAX_ASSEMBLY_STR_LEN];
+} DumbuggerAssemblyDump;
+
+/* 
+ * Дизассемблировать length следующих машинных инструкций
+ */
+int dmbg_disassemble(DumbuggerState *state, int length, DumbuggerAssemblyDump *result);
+
+/* 
+ * Освободить место, выделенное для процесса дизассемблирования
+ */
+int dumb_assembly_dump_free(DumbuggerAssemblyDump *dump);
 
 #endif

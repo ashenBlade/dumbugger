@@ -1,0 +1,6 @@
+*.tar.gz
+gdb-src
+bin
+include
+share
+lib
