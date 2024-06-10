@@ -79,7 +79,7 @@ int main(int argc, const char **argv)
         printf("assembler:\n");
         for (int i = 0; i < dump.length; i++)
         {
-            printf("\t%s\n", dump.as[i]);
+            printf("0x%08lx:\t%s\n", dump.insns[i].addr, dump.insns[i].str);
         }
         printf("\n");
 

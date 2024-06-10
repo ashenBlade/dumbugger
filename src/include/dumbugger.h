@@ -106,10 +106,13 @@ typedef struct DumbuggerAssemblyDump {
 #define DMBG_MAX_ASSEMBLY_STR_LEN 32
 
     /* 
-     * Массив строк дизассемблированных инструкций.
-     * Каждая строка оканчивается '\0'
+     * Массив пар адрес и строка ассемблера.
+     * Каждая строка оканчивается '\0'.
      */
-    char (*as)[DMBG_MAX_ASSEMBLY_STR_LEN];
+    struct {
+        long addr;
+        char str[DMBG_MAX_ASSEMBLY_STR_LEN];
+    } *insns;
 } DumbuggerAssemblyDump;
 
 /* 

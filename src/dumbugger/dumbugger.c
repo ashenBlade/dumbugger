@@ -354,7 +354,7 @@ static int fprintf_dumbugger_assembly_dump(void *stream, const char *fmt, ...)
     }
 
     va_start(argp, fmt);
-    written = snprintf(&buf->dump->as[buf->insn_index][buf->asm_str_index], sizeof(buf->dump->as[buf->insn_index]) - buf->asm_str_index, fmt, argp);
+    written = snprintf(&buf->dump->insns[buf->insn_index].str[buf->asm_str_index], sizeof(buf->dump->insns[buf->insn_index].str) - buf->asm_str_index, fmt, argp);
     va_end(argp);
 
     if (written < 0)
@@ -475,9 +475,8 @@ int dmbg_disassemble(DumbuggerState *state, int length, DumbuggerAssemblyDump *r
     };
 
     memset(result, 0, sizeof(DumbuggerAssemblyDump));
-    size_t asdf = (size_t)length * sizeof(result->as[0]);
-    result->as = (char(*)[DMBG_MAX_ASSEMBLY_STR_LEN])malloc((size_t)length * sizeof(result->as[0]));
-    if (result->as == NULL)
+    result->insns = malloc((size_t)length * sizeof(result->insns[0]));
+    if (result->insns == NULL)
     {
         return -1;
     }
@@ -486,7 +485,7 @@ int dmbg_disassemble(DumbuggerState *state, int length, DumbuggerAssemblyDump *r
     struct disassemble_info di;
     init_disassemble_info(&di, &buf, (fprintf_ftype)fprintf_dumbugger_assembly_dump, (fprintf_styled_ftype)fprintf_styled_dumbugger_assembly_dump);
     di.arch = bfd_arch_i386;
-    di.mach = bfd_mach_x86_64_intel_syntax;
+    di.mach = bfd_mach_x86_64;
     di.endian = BFD_ENDIAN_LITTLE;
     disassemble_init_for_target(&di);
 
@@ -506,6 +505,7 @@ int dmbg_disassemble(DumbuggerState *state, int length, DumbuggerAssemblyDump *r
         {
             return -1;
         }
+        buf.dump->insns[buf.insn_index].addr = rip;
         rip += processed;
         --left;
         ++buf.insn_index;
@@ -522,7 +522,7 @@ int dumb_assembly_dump_free(DumbuggerAssemblyDump *dump)
 {
     if (0 < dump->length)
     {
-        free(dump->as);
+        free(dump->insns);
     }
 
     memset(dump, 0, sizeof(DumbuggerAssemblyDump));
