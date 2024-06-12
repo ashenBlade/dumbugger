@@ -13,6 +13,7 @@
 #include "dis-asm.h"
 
 #include "dumbugger.h"
+#include "list.h"
 
 #define WIFBREAKPOINT(wstatus) (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGTRAP)
 
@@ -40,12 +41,14 @@ typedef struct BreakpointInfo
 {
     /* Адрес точки останова */
     long address;
-    /* 
+    /*
      * Сохраненный по этому адресу байт.
      * Использовать надо только байт, а не весь long
      */
     long saved_text;
 } BreakpointInfo;
+
+LIST_DEFINE(BreakpointInfo, bp_list)
 
 struct DumbuggerState
 {
@@ -63,27 +66,26 @@ struct DumbuggerState
      */
     int wstatus;
 
-    /* 
+    /*
      * Адрес последней достигнутой точки останова.
      * Обновляется каждый раз при достижении новой точки останова
      */
     long prev_breakpoint_addr;
-    /* 
-     * Количество установленных точек останова 
+    /*
+     * Количество установленных точек останова
      */
     int bp_count;
-    /* 
-     * Выделенное в массиве breakpoints место 
+    /*
+     * Выделенное в массиве breakpoints место
      */
     int bp_capacity;
-    /* 
-     * Массив точек останова 
+    /*
+     * Массив точек останова
      */
-    BreakpointInfo *breakpoints;
+    bp_list breakpoints;
 };
 
-static
-__attribute__((noreturn)) void run_child(const char **args)
+static void run_child(const char **args)
 {
     if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) == -1)
     {
@@ -96,12 +98,6 @@ __attribute__((noreturn)) void run_child(const char **args)
 
 static int get_rip(DumbuggerState *state, long *rip)
 {
-    struct user_regs_struct regs;
-    if (ptrace(PTRACE_GETREGS, state->pid, NULL, &regs) == -1)
-    {
-        return -1;
-    }
-
     long value = ptrace(PTRACE_PEEKUSER, state->pid, sizeof(long) * REG_RIP, NULL);
     if (value == -1 && errno != 0)
     {
@@ -110,6 +106,28 @@ static int get_rip(DumbuggerState *state, long *rip)
 
     *rip = value;
     return 0;
+}
+
+static int set_rip(DumbuggerState *state, long rip)
+{
+    return ptrace(PTRACE_POKEUSER, state->pid, sizeof(long) * REG_RIP, rip);
+}
+
+static int peek_text(DumbuggerState *state, long addr, long *text)
+{
+    errno = 0;
+    long data = ptrace(PTRACE_PEEKTEXT, state->pid, addr, NULL);
+    if (data == -1 && errno != 0)
+    {
+        return -1;
+    }
+    *text = data;
+    return 0;
+}
+
+static int poke_text(DumbuggerState *state, long addr, long text)
+{
+    return ptrace(PTRACE_POKETEXT, state->pid, addr, text);
 }
 
 DumbuggerState *
@@ -241,6 +259,65 @@ int dmbg_stop_reason(DumbuggerState *state, DmbgStopReason *reason)
     return 0;
 }
 
+static int breakpoint_equals_address_predicate(void *context, BreakpointInfo *info)
+{
+    long address = (long)context;
+    return info->address == address;
+}
+
+/*
+ * Восстановить секцию кода, после того, как произошла остановка при полученном SIGTRAP.
+ * Возвращаемые значения:
+ * -1 - ошибка
+ *  0 - точка останова не найдена (возможно это пользовательская точка)
+ *  1 - успешно восстановлено
+ */
+static int restore_after_breakpoint(DumbuggerState *state)
+{
+    /*
+     * Мы уже выполнили int 0x3, но точка останова была на _начале_ инструкции, а не после - надо откатиться
+     */
+    long rip;
+    if (get_rip(state, &rip) == -1)
+    {
+        return -1;
+    }
+    --rip;
+
+    BreakpointInfo *info;
+    if (!bp_list_contains(&state->breakpoints, breakpoint_equals_address_predicate, (void *)rip, &info))
+    {
+        printf("not exists\n");
+        return 0;
+    }
+
+    assert(info->address == rip);
+    if (set_rip(state, rip) == -1)
+    {
+        return -1;
+    }
+
+    long data;
+    if (peek_text(state, rip, &data) == -1)
+    {
+        return -1;
+    }
+
+    if ((data & ((long) 0xFF)) != ((long) 0xCC))
+    {
+        printf("not equal\n");
+    }
+
+    data = (data & ((long) ~0xFF)) | (info->saved_text & ((long)0xFF));
+
+    if (poke_text(state, rip, data) == -1)
+    {
+        return -1;
+    }
+
+    return 1;
+}
+
 int dmbg_wait(DumbuggerState *state)
 {
     if (state->state != PROCESS_STATE_RUNNING)
@@ -263,25 +340,34 @@ int dmbg_wait(DumbuggerState *state)
         if (WIFEXITED(state->wstatus))
         {
             state->state = PROCESS_STATE_FINISHED;
+            return 0;
         }
-        else if (WIFBREAKPOINT(state->wstatus))
+
+        if (WIFBREAKPOINT(state->wstatus))
         {
-            state->state = PROCESS_STATE_STOPPED;
-        }
-        else
-        {
-            if (ptrace(PTRACE_CONT, state->pid, NULL, NULL) == -1)
+            switch (restore_after_breakpoint(state))
             {
+            case -1 /* ошибка */:
                 return -1;
+            case 0 /* ложное срабатывание */:
+                // break;
+            case 1 /* точка останова */:
+                state->state = PROCESS_STATE_STOPPED;
+                return 0;
+            default:
+                assert(false);
             }
-
-            continue;
         }
 
-        break;
+        if (ptrace(PTRACE_CONT, state->pid, NULL, NULL) == -1)
+        {
+            return -1;
+        }
     }
 
-    return 0;
+    /* Не должны сюда попасть */
+    assert(false);
+    return -1;
 }
 
 int dmbg_continue(DumbuggerState *state)
@@ -297,8 +383,6 @@ int dmbg_continue(DumbuggerState *state)
         errno = ESRCH;
         return -1;
     }
-
-    struct user_regs_struct s;
 
     if (ptrace(PTRACE_CONT, state->pid, NULL, NULL) == -1)
     {
@@ -417,13 +501,13 @@ static int fprintf_styled_dumbugger_assembly_dump(void *stream, enum disassemble
 {
     if (style == dis_style_text)
     {
-        /* 
+        /*
          * Тут всякие управляющие последовательности и так далее.
          * Они (как минимум у меня) не отображаются и мешают обзору
          */
         return 0;
     }
-    
+
     int res;
     va_list argp;
     va_start(argp, fmt);
@@ -446,7 +530,7 @@ static int read_tracee_memory_func(bfd_vma memaddr, bfd_byte *myaddr, unsigned i
     }
 
     unsigned int left = length;
-    
+
     /* Каждый раз мы читаем машинное слово, поэтому каждый цикл будем загружать  */
     while (0 < left)
     {
@@ -559,76 +643,26 @@ int dumb_assembly_dump_free(DumbuggerAssemblyDump *dump)
     return 0;
 }
 
-static
-int peek_text(DumbuggerState *state, long addr, long *text)
+static int dumbugger_state_add_breakpoint(DumbuggerState *state, BreakpointInfo *info)
 {
-    errno = 0;
-    long data = ptrace(PTRACE_PEEKTEXT, state->pid, NULL, &addr);
-    if (data == -1 && errno != 0)
-    {
-        return -1;
-    }
-    *text = data;
-    return 0;
+    return bp_list_add(&state->breakpoints, info);
 }
 
-static 
-int poke_text(DumbuggerState *state, long addr, long text)
+int dmbg_set_breakpoint(DumbuggerState *state, long addr)
 {
-    if (ptrace(PTRACE_POKETEXT, state->pid, &addr, &text) == -1)
-    {
-        return -1;
-    }
-
-    return 0;
-}
-
-static
-int dumbugger_state_add_breakpoint(DumbuggerState *state, BreakpointInfo *info)
-{
-    if (state->bp_capacity == 0)
-    {
-        state->bp_capacity = 4;
-        state->breakpoints = calloc(sizeof(BreakpointInfo), state->bp_capacity);
-    }
-    else if (state->bp_count == state->bp_capacity)
-    {
-        state->bp_capacity *= 2;
-        state->breakpoints  = realloc(state->breakpoints, sizeof(BreakpointInfo) * state->bp_capacity);
-    }
-
-    if (state->breakpoints == NULL)
-    {
-        return -1;
-    }
-
-    int index = state->bp_count;
-    memcpy(&state->breakpoints[index], info, sizeof(BreakpointInfo));
-    return 0;
-}
-
-int dmbg_set_breakpoint(DumbuggerState  *state, long addr)
-{
-    long rip;
-    if (get_rip(state, &rip) == -1)
-    {
-        return -1;
-    }
-
     long text;
-    if (peek_text(state, rip, &text) == -1)
+    if (peek_text(state, addr, &text) == -1)
     {
         return -1;
     }
 
     BreakpointInfo bi = {
-        .address = rip,
+        .address = addr,
         .saved_text = text,
     };
 
-    ((char *)text)[0] = (char) 0xCC;
-
-    if (poke_text(state, rip, text) == -1)
+    long new_text = (text & ~0xFF) | ((long)0xCC);
+    if (poke_text(state, addr, new_text) == -1)
     {
         return -1;
     }
@@ -643,19 +677,24 @@ int dmbg_set_breakpoint(DumbuggerState  *state, long addr)
 
 static int dumbugger_state_remove_breakpoint(DumbuggerState *state, long addr)
 {
-    if (state->bp_count == 0)
+    if (list_size(&state->breakpoints) == 0)
     {
         return 0;
     }
 
-    for (int i = 0; i < state->bp_count; i++)
+    BreakpointInfo *info;
+    int index = 0;
+    foreach (info, &state->breakpoints)
     {
-        BreakpointInfo *bi = &state->breakpoints[i];
-        if (bi->address == addr)
+        if (info->address == addr)
         {
-            memcpy(bi, bi + 1, sizeof(BreakpointInfo) * (state->bp_count - i - 1));
+            if (bp_list_remove(&state->breakpoints, index) == -1)
+            {
+                return -1;
+            }
             return 1;
         }
+        ++index;
     }
 
     return 0;
@@ -663,11 +702,17 @@ static int dumbugger_state_remove_breakpoint(DumbuggerState *state, long addr)
 
 int dmbg_remove_breakpoint(DumbuggerState *state, long addr)
 {
-    if (dumbugger_state_remove_breakpoint(state, addr) == 0)
+    int result = dumbugger_state_remove_breakpoint(state, addr);
+    if (result == 0)
     {
         errno = EINVAL;
         return -1;
     }
-    
+
+    if (result == -1)
+    {
+        return -1;
+    }
+
     return 0;
 }

@@ -61,6 +61,8 @@ int dmbg_wait(DumbuggerState *state);
  */
 int dmbg_continue(DumbuggerState  *state);
 
+
+
 /* Структура, представляющая регистры процессора */
 typedef struct Registers
 {

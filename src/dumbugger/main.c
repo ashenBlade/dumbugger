@@ -100,7 +100,7 @@ static int list_assembler_cmd(program_state* state, int argc, const char** argv)
     dprintf(STDOUT_FILENO, "\n");
     for (int i = 0; i < dump.length; i++)
     {
-        dprintf(STDOUT_FILENO, "0x%08lx:\t%s\n", dump.insns[i].addr, dump.insns[i].str);
+        dprintf(STDOUT_FILENO, "%ld\t0x%08lx:\t%s\n", dump.insns[i].addr, dump.insns[i].addr, dump.insns[i].str);
     }
     dprintf(STDOUT_FILENO, "\n");
 
@@ -146,6 +146,38 @@ static int stop_running_process_cmd(program_state* state, int argc, const char**
     return 0;
 }
 
+static int set_breakpoint_cmd(program_state *state, int argc, const char **argv)
+{
+    if (argc != 2)
+    {
+        printf("breakpoint address not specified\n");
+        return 0;
+    }
+
+    /* Если в начале 0x, то пропускаем */
+    const char *start_addr = argv[1];
+    if (strncmp(start_addr, "0x", 2) == 0 || strncmp(start_addr, "0X", 2) == 0)
+    {
+        start_addr += 2;
+    }
+
+    errno = 0;
+    long addr = strtol(start_addr, NULL, 16);
+    if (errno != 0)
+    {
+        printf("could not parse address \"%s\": %s\n", argv[1], strerror(errno));
+        return 0;
+    }
+
+    if (dmbg_set_breakpoint(state->dmbg_state, addr) == -1)
+    {
+        printf("bp error: %s\n", strerror(errno));
+        return -1;
+    }
+
+    return 0;
+}
+
 static int continue_cmd(program_state* state, int argc, const char** argv)
 {
     if (dmbg_continue(state->dmbg_state) == -1)
@@ -171,6 +203,7 @@ static CommandsRegistry *build_commands_registry()
     CMDREG_ADD("list", list_assembler_cmd);
     CMDREG_ADD("stop", stop_running_process_cmd);
     CMDREG_ADD("continue", continue_cmd);
+    CMDREG_ADD("set-breakpoint", set_breakpoint_cmd);
     
     return reg;
 }
