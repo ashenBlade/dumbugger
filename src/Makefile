@@ -7,8 +7,14 @@ main.o: dumbugger/main.c
 dumbugger.o: dumbugger/dumbugger.c
 	$(CC) $(CC_FLAGS) -c dumbugger/dumbugger.c -o dumbugger/dumbugger.o
 
-dumbugger: main.o dumbugger.o
-	$(CC) dumbugger/main.o dumbugger/dumbugger.o -o dumbugger/dumbugger -Llibopcodes/lib -lopcodes -lbfd -liberty -lsframe -lz
+utils.o: dumbugger/utils.c
+	$(CC) $(CC_FLAGS) -c dumbugger/utils.c -o dumbugger/utils.o
+
+commands.o: dumbugger/commands.c
+	$(CC) $(CC_FLAGS) -c dumbugger/commands.c -o dumbugger/commands.o
+
+dumbugger: main.o dumbugger.o utils.o commands.o
+	$(CC) $(CC_FLAGS) dumbugger/main.o dumbugger/dumbugger.o dumbugger/utils.o dumbugger/commands.o -o dumbugger/dumbugger -Llibopcodes/lib -lopcodes -lbfd -liberty -lsframe -lz
 
 all: dumbugger
 

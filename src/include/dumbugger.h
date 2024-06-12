@@ -125,4 +125,15 @@ int dmbg_disassemble(DumbuggerState *state, int length, DumbuggerAssemblyDump *r
  */
 int dumb_assembly_dump_free(DumbuggerAssemblyDump *dump);
 
+/* 
+ * Поставить точку останова на указанный адрес.
+ * Точка останова будет срабатывать каждый раз при ее достижении, т.е. 
+ */
+int dmbg_set_breakpoint(DumbuggerState *state, long addr);
+
+/* 
+ * Удалить точку останова по указанному адресу
+ */
+int dmbg_remove_breakpoint(DumbuggerState  *state, long addr);
+
 #endif

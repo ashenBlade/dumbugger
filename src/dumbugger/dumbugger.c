@@ -36,6 +36,17 @@ typedef enum ProcessState
     PROCESS_STATE_FINISHED = 2,
 } ProcessState;
 
+typedef struct BreakpointInfo
+{
+    /* Адрес точки останова */
+    long address;
+    /* 
+     * Сохраненный по этому адресу байт.
+     * Использовать надо только байт, а не весь long
+     */
+    long saved_text;
+} BreakpointInfo;
+
 struct DumbuggerState
 {
     /* pid отлаживаемого процесса */
@@ -51,11 +62,28 @@ struct DumbuggerState
      * Используется для получения различных состояний процесса.
      */
     int wstatus;
+
+    /* 
+     * Адрес последней достигнутой точки останова.
+     * Обновляется каждый раз при достижении новой точки останова
+     */
+    long prev_breakpoint_addr;
+    /* 
+     * Количество установленных точек останова 
+     */
+    int bp_count;
+    /* 
+     * Выделенное в массиве breakpoints место 
+     */
+    int bp_capacity;
+    /* 
+     * Массив точек останова 
+     */
+    BreakpointInfo *breakpoints;
 };
 
 static
-    __attribute__((noreturn)) void
-    run_child(const char **args)
+__attribute__((noreturn)) void run_child(const char **args)
 {
     if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) == -1)
     {
@@ -64,6 +92,24 @@ static
 
     execvp(args[0], (char *const *)args);
     exit(errno);
+}
+
+static int get_rip(DumbuggerState *state, long *rip)
+{
+    struct user_regs_struct regs;
+    if (ptrace(PTRACE_GETREGS, state->pid, NULL, &regs) == -1)
+    {
+        return -1;
+    }
+
+    long value = ptrace(PTRACE_PEEKUSER, state->pid, sizeof(long) * REG_RIP, NULL);
+    if (value == -1 && errno != 0)
+    {
+        return -1;
+    }
+
+    *rip = value;
+    return 0;
 }
 
 DumbuggerState *
@@ -78,12 +124,15 @@ dmbg_run(const char *prog_name, const char **args)
         return NULL;
     }
 
-    DumbuggerState *state = (DumbuggerState *)calloc(sizeof(DumbuggerState), 1);
+    DumbuggerState *state = (DumbuggerState *)calloc(1, sizeof(DumbuggerState));
     if (state == NULL)
     {
         errno = ENOMEM;
         return NULL;
     }
+
+    /* Сразу выставим все поля в 0 */
+    memset(state, 0, sizeof(DumbuggerState));
 
     pid_t child_pid = fork();
     if (child_pid == -1)
@@ -100,7 +149,6 @@ dmbg_run(const char *prog_name, const char **args)
 
     state->pid = child_pid;
     state->wstatus = 0;
-    state->state = PROCESS_STATE_RUNNING;
 
     if (waitpid(child_pid, &state->wstatus, 0) != child_pid)
     {
@@ -384,24 +432,6 @@ static int fprintf_styled_dumbugger_assembly_dump(void *stream, enum disassemble
     return res;
 }
 
-static int get_rip_reg(DumbuggerState *state, long *rip)
-{
-    struct user_regs_struct regs;
-    if (ptrace(PTRACE_GETREGS, state->pid, NULL, &regs) == -1)
-    {
-        return -1;
-    }
-
-    long value = ptrace(PTRACE_PEEKUSER, state->pid, sizeof(long) * REG_RIP, NULL);
-    if (value == -1 && errno != 0)
-    {
-        return -1;
-    }
-
-    *rip = value;
-    return 0;
-}
-
 /* Function used to get bytes to disassemble.  MEMADDR is the
    address of the stuff to be disassembled, MYADDR is the address to
    put the bytes in, and LENGTH is the number of bytes to read.
@@ -462,7 +492,7 @@ int dmbg_disassemble(DumbuggerState *state, int length, DumbuggerAssemblyDump *r
     }
 
     long rip;
-    if (get_rip_reg(state, &rip) == -1)
+    if (get_rip(state, &rip) == -1)
     {
         return -1;
     }
@@ -526,5 +556,118 @@ int dumb_assembly_dump_free(DumbuggerAssemblyDump *dump)
     }
 
     memset(dump, 0, sizeof(DumbuggerAssemblyDump));
+    return 0;
+}
+
+static
+int peek_text(DumbuggerState *state, long addr, long *text)
+{
+    errno = 0;
+    long data = ptrace(PTRACE_PEEKTEXT, state->pid, NULL, &addr);
+    if (data == -1 && errno != 0)
+    {
+        return -1;
+    }
+    *text = data;
+    return 0;
+}
+
+static 
+int poke_text(DumbuggerState *state, long addr, long text)
+{
+    if (ptrace(PTRACE_POKETEXT, state->pid, &addr, &text) == -1)
+    {
+        return -1;
+    }
+
+    return 0;
+}
+
+static
+int dumbugger_state_add_breakpoint(DumbuggerState *state, BreakpointInfo *info)
+{
+    if (state->bp_capacity == 0)
+    {
+        state->bp_capacity = 4;
+        state->breakpoints = calloc(sizeof(BreakpointInfo), state->bp_capacity);
+    }
+    else if (state->bp_count == state->bp_capacity)
+    {
+        state->bp_capacity *= 2;
+        state->breakpoints  = realloc(state->breakpoints, sizeof(BreakpointInfo) * state->bp_capacity);
+    }
+
+    if (state->breakpoints == NULL)
+    {
+        return -1;
+    }
+
+    int index = state->bp_count;
+    memcpy(&state->breakpoints[index], info, sizeof(BreakpointInfo));
+    return 0;
+}
+
+int dmbg_set_breakpoint(DumbuggerState  *state, long addr)
+{
+    long rip;
+    if (get_rip(state, &rip) == -1)
+    {
+        return -1;
+    }
+
+    long text;
+    if (peek_text(state, rip, &text) == -1)
+    {
+        return -1;
+    }
+
+    BreakpointInfo bi = {
+        .address = rip,
+        .saved_text = text,
+    };
+
+    ((char *)text)[0] = (char) 0xCC;
+
+    if (poke_text(state, rip, text) == -1)
+    {
+        return -1;
+    }
+
+    if (dumbugger_state_add_breakpoint(state, &bi) == -1)
+    {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int dumbugger_state_remove_breakpoint(DumbuggerState *state, long addr)
+{
+    if (state->bp_count == 0)
+    {
+        return 0;
+    }
+
+    for (int i = 0; i < state->bp_count; i++)
+    {
+        BreakpointInfo *bi = &state->breakpoints[i];
+        if (bi->address == addr)
+        {
+            memcpy(bi, bi + 1, sizeof(BreakpointInfo) * (state->bp_count - i - 1));
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+int dmbg_remove_breakpoint(DumbuggerState *state, long addr)
+{
+    if (dumbugger_state_remove_breakpoint(state, addr) == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    
     return 0;
 }
