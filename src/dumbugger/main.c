@@ -15,7 +15,7 @@
 typedef struct program_state
 {
     int argc;
-    const char** argv;
+    const char **argv;
     DumbuggerState *dmbg_state;
     CommandsRegistry *cmdreg;
 } program_state;
@@ -26,15 +26,16 @@ static void print_help(const char *progname)
     printf("Dumbugger, dumb(de)bugger - simple debugger with **very** limited set of real debugger features.\n");
 }
 
-static int print_help_cmd(program_state *state, int argc, const char** argv)
+static int print_help_cmd(program_state *state, int argc, const char **argv)
 {
-    printf("help\t- show this help message\n"
-           "regs\t- show registers state\n"
-           "list [N]\t- show next N assembler instructions, 5 by default\n"
-           "continue\t- continue execution\n");
+    printf("help\t\t- show this help message\n"
+           "regs show\t\t- show registers state\n"
+           "regs set REG VALUE\t- set value of register REG to VALUE\n"
+           "list [N]\t\t- show next N assembler instructions, 5 by default\n"
+           "continue\t\t- continue execution\n");
 }
 
-static int show_regs_cmd(program_state* state, int argc, const char** argv)
+static int show_regs_cmd(program_state  *state, int argc, const char **argv)
 {
     Registers regs;
     if (dmbg_get_regs(state->dmbg_state, &regs) == -1)
@@ -42,27 +43,108 @@ static int show_regs_cmd(program_state* state, int argc, const char** argv)
         return -1;
     }
 
-    if (argc == 1)
-    {
-        printf("registers:\n"
-               "\trdi:\t%llu\n"
-               "\trsi:\t%llu\n"
-               "\trdx:\t%llu\n",
-              regs.rdi, regs.rsi, regs.rdx);
-        return 0;
-    }
-
-    /* FIXME: пока не знаю надо ли отдельный регистр показывать */
     printf("registers:\n"
-           "\trdi:\t%llu\n"
-           "\trsi:\t%llu\n"
-           "\trdx:\t%llu\n",
-           regs.rdi, regs.rsi, regs.rdx);
+            "\trdi:\t%llu\n"
+            "\trsi:\t%llu\n"
+            "\trdx:\t%llu\n",
+            regs.rdi, regs.rsi, regs.rdx);
 
     return 0;
 }
 
-static int list_assembler_cmd(program_state* state, int argc, const char** argv)
+static int set_reg_cmd(program_state *state, int argc, const char **argv)
+{
+    if (argc != 4)
+    {
+        printf("usage: regs set REG VALUE\n");
+        return 0;
+    }
+
+    /* Парсим число в соответствии с его основанием */
+    long base = 10;
+    const char *start_pos = argv[3];
+    if (strncmp(start_pos, "0x", sizeof("0x") - 1) == 0 ||
+        strncmp(start_pos, "0X", sizeof("0X") - 1) == 0)
+    {
+        base = 16;
+        start_pos += sizeof("0x") - 1;
+    }
+    else if (strncmp(start_pos, "0b", sizeof("0b") - 1) == 0 || 
+            strncmp(start_pos, "0B", sizeof("0B") - 1) == 0)
+    {
+        base = 2;
+        start_pos += sizeof("0b") - 1;
+    }
+    else if (strncmp(start_pos, "0", sizeof("0") - 1) == 0)
+    {
+        base = 8;
+        start_pos += sizeof("0") - 1;
+    }
+
+    long value = strtol(start_pos, NULL, base);
+    if (errno != 0)
+    {
+        printf("error parsing number \"%s\": %s\n", argv[3], strerror(errno));
+        return 0;
+    }
+
+    /* Обновляем значение регистра */
+    Registers regs;
+    if (dmbg_get_regs(state->dmbg_state, &regs) == -1)
+    {
+        return -1;
+    }
+    
+    const char *reg = argv[2];
+    if (strcasecmp(reg, "rdi") ==  0)
+    {
+        regs.rdi = value;
+    }
+    else if (strcasecmp(reg, "rsi") == 0)
+    {
+        regs.rsi = value;
+    }
+    else if (strcasecmp(reg, "rdx") == 0)
+    {
+        regs.rdx = value;
+    }
+    else
+    {
+        printf("register \"%s\" not supported yet, only: rdi, rsi rdx\n", reg);
+        return 0;
+    }
+
+    if (dmbg_set_regs(state->dmbg_state, &regs) == -1)
+    {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int regs_cmd(program_state *state, int argc, const char **argv)
+{
+    if (argc == 1)
+    {
+        printf("command for \"regs\" not specified: use \"show\" or \"set\"\n");
+        return 0;
+    }
+
+    if (strncasecmp(argv[1], "show", sizeof("show") - 1) == 0)
+    {
+        return show_regs_cmd(state, argc, argv);
+    }
+
+    if (strncasecmp(argv[1], "set", sizeof("set") - 1) == 0)
+    {
+        return set_reg_cmd(state, argc, argv);
+    }
+
+    printf("unknown command \"%s\": use \"show\" or \"set\"\n", argv[1]);
+    return 0;
+}
+
+static int list_assembler_cmd(program_state *state, int argc, const char **argv)
 {
     int length;
     if (argc == 1)
@@ -72,7 +154,7 @@ static int list_assembler_cmd(program_state* state, int argc, const char** argv)
     else if (argc == 2)
     {
         errno = 0;
-        length = (int) strtol(argv[1], NULL, 10);
+        length = (int)strtol(argv[1], NULL, 10);
         if (errno != 0)
         {
             printf("could not parse number \"%s\": %s\n", argv[1], strerror(errno));
@@ -112,9 +194,9 @@ static int list_assembler_cmd(program_state* state, int argc, const char** argv)
     return 0;
 }
 
-static int stop_running_process_cmd(program_state* state, int argc, const char** argv)
+static int stop_running_process_cmd(program_state *state, int argc, const char **argv)
 {
-    do 
+    do
     {
         if (write(STDOUT_FILENO, "stop runnning process? y\\n: ", sizeof("stop runnning process? y\\n")) == -1)
         {
@@ -142,7 +224,7 @@ static int stop_running_process_cmd(program_state* state, int argc, const char**
     {
         return -1;
     }
-    
+
     return 0;
 }
 
@@ -178,7 +260,7 @@ static int set_breakpoint_cmd(program_state *state, int argc, const char **argv)
     return 0;
 }
 
-static int continue_cmd(program_state* state, int argc, const char** argv)
+static int continue_cmd(program_state *state, int argc, const char **argv)
 {
     if (dmbg_continue(state->dmbg_state) == -1)
     {
@@ -196,15 +278,19 @@ static CommandsRegistry *build_commands_registry()
         return NULL;
     }
 
-#define CMDREG_ADD(name, func) if (cmdreg_add(reg, name, (command_func) &func) == -1) { return NULL; }
+#define CMDREG_ADD(name, func)                              \
+    if (cmdreg_add(reg, name, (command_func) & func) == -1) \
+    {                                                       \
+        return NULL;                                        \
+    }
 
     CMDREG_ADD("help", print_help_cmd);
-    CMDREG_ADD("regs", show_regs_cmd);
+    CMDREG_ADD("regs", regs_cmd);
     CMDREG_ADD("list", list_assembler_cmd);
     CMDREG_ADD("stop", stop_running_process_cmd);
     CMDREG_ADD("continue", continue_cmd);
     CMDREG_ADD("set-breakpoint", set_breakpoint_cmd);
-    
+
     return reg;
 }
 
@@ -267,7 +353,7 @@ static int process_user_input(program_state *state)
         }
 
         int result = cmd((void *)state, argc, argv);
-        /* 
+        /*
          * -1 - ошибка
          *  1 - следует завершить обработку команд (работа продолжилась, single step и т.д.)
          *  0 - продолжаем обрабатывать команды пользователя
@@ -302,7 +388,6 @@ int main(int argc, const char **argv)
         return 0;
     }
 
-
     DumbuggerState *dmbg;
     CommandsRegistry *reg;
 
@@ -311,7 +396,6 @@ int main(int argc, const char **argv)
         printf("failed to register commands: %s\n", strerror(errno));
         return 1;
     }
-
 
     if ((dmbg = dmbg_run(argv[1], argv + 1)) == NULL)
     {
