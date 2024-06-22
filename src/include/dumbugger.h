@@ -138,4 +138,15 @@ int dmbg_set_breakpoint(DumbuggerState *state, long addr);
  */
 int dmbg_remove_breakpoint(DumbuggerState  *state, long addr);
 
+/* 
+ * Получить список всех функций, доступных в процессе.
+ * При завершении необходимо вызвать dmbg_functions_free для освобождения ресурсов
+ */
+int dmbg_functions_get(DumbuggerState *state, const char ***functions, int *functions_count);
+
+/* 
+ * Освободить ресурсы выделенные для создания списка функций
+ */
+int dmbg_function_list_free(const char **functions, int functions_count);
+
 #endif

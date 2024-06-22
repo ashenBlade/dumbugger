@@ -9,11 +9,16 @@
 #include <errno.h>
 #include <string.h>
 #include <stdbool.h>
+#include <linux/limits.h>
+
+#include <libdwarf-0/dwarf.h>
+#include <libdwarf-0/libdwarf.h>
 
 #include "dis-asm.h"
 
 #include "dumbugger.h"
 #include "list.h"
+#include "debug_syms.h"
 
 #define WIFBREAKPOINT(wstatus) (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGTRAP)
 
@@ -83,6 +88,11 @@ struct DumbuggerState
      * Массив точек останова
      */
     bp_list breakpoints;
+
+    /* 
+     * Отладочная информация процесса
+     */
+    DebugInfo debug_info;
 };
 
 static void run_child(const char **args)
@@ -130,6 +140,32 @@ static int poke_text(DumbuggerState *state, long addr, long text)
     return ptrace(PTRACE_POKETEXT, state->pid, addr, text);
 }
 
+static int get_debug_info(DumbuggerState *state, pid_t child_pid)
+{
+    char link_path[32];
+    char exe_path[PATH_MAX];
+    memset(link_path, 0, sizeof(link_path));
+    int len = sprintf(link_path, "/proc/%d/exe", (int)child_pid);
+    if (len == -1)
+    {
+        return -1;
+    }
+
+    int length;
+    if ((length = readlink(link_path, exe_path, sizeof(exe_path))) == -1)
+    {
+        return -1;
+    }
+
+    exe_path[length + 1] = '\0';
+    if (debug_syms_get(exe_path, &state->debug_info) == -1)
+    {
+        return -1;
+    }
+
+    return 0;
+}
+
 DumbuggerState *
 dmbg_run(const char *prog_name, const char **args)
 {
@@ -162,7 +198,7 @@ dmbg_run(const char *prog_name, const char **args)
     if (child_pid == 0)
     {
         run_child(args);
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     state->pid = child_pid;
@@ -182,6 +218,15 @@ dmbg_run(const char *prog_name, const char **args)
          * Но если это не так и процесс завершился заранее, то код возврата - код ошибки
          */
         errno = WEXITSTATUS(state->wstatus);
+        free(state);
+        return NULL;
+    }
+
+    /* Получаем отладочную информацию */
+    if (get_debug_info(state, child_pid) == -1)
+    {
+        kill(child_pid, SIGKILL);
+        (void) waitpid(child_pid, NULL, 0);
         free(state);
         return NULL;
     }
@@ -714,5 +759,31 @@ int dmbg_remove_breakpoint(DumbuggerState *state, long addr)
         return -1;
     }
 
+    return 0;
+}
+
+int dmbg_functions_get(DumbuggerState *state, const char ***functions, int *functions_count)
+{
+    STOPPED_PROCESS_GUARD(state);
+    const char **funcs_names = (const char **) calloc(sizeof(char *), state->debug_info.functions_count);
+    if (funcs_names == NULL)
+    {
+        return -1;
+    }
+
+    for (size_t i = 0; i < state->debug_info.functions_count; i++)
+    {
+        funcs_names[i] = state->debug_info.functions[i].name;
+    }
+
+    *functions_count  =  state->debug_info.functions_count;
+    *functions = funcs_names;
+    return 0;
+}
+
+int dmbg_function_list_free(const char **functions, int functions_count)
+{
+    (void)functions_count;
+    free((void *)functions);
     return 0;
 }

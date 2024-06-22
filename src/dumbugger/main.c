@@ -28,11 +28,13 @@ static void print_help(const char *progname)
 
 static int print_help_cmd(program_state *state, int argc, const char **argv)
 {
-    printf("help\t\t- show this help message\n"
+    printf("help\t\t\t- show this help message\n"
            "regs show\t\t- show registers state\n"
            "regs set REG VALUE\t- set value of register REG to VALUE\n"
            "list [N]\t\t- show next N assembler instructions, 5 by default\n"
+           "functions show\t\t- show functions in process \n"
            "continue\t\t- continue execution\n");
+    return 0;
 }
 
 static int show_regs_cmd(program_state  *state, int argc, const char **argv)
@@ -49,6 +51,33 @@ static int show_regs_cmd(program_state  *state, int argc, const char **argv)
             "\trdx:\t%llu\n",
             regs.rdi, regs.rsi, regs.rdx);
 
+    return 0;
+}
+
+static int functions_cmd(program_state *state, int argc, const char **argv)
+{
+    const char **functions;
+    int functions_count;
+    if (dmbg_functions_get(state->dmbg_state, &functions, &functions_count) == -1)
+    {
+        return -1;
+    }
+
+    if (functions_count == 0)
+    {
+        printf("no functions found in process\n");
+        dmbg_function_list_free(functions, functions_count);
+        return 0;
+    }
+
+    printf("functions:\n");
+    for (size_t i = 0; i < functions_count; i++)
+    {
+        printf("\t%s\n", functions[i]);
+    }
+    printf("\n");
+
+    dmbg_function_list_free(functions, functions_count);
     return 0;
 }
 
@@ -290,6 +319,7 @@ static CommandsRegistry *build_commands_registry()
     CMDREG_ADD("stop", stop_running_process_cmd);
     CMDREG_ADD("continue", continue_cmd);
     CMDREG_ADD("set-breakpoint", set_breakpoint_cmd);
+    CMDREG_ADD("functions", functions_cmd);
 
     return reg;
 }

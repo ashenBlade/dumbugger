@@ -3,10 +3,11 @@ TAR_FILE_NAME=gdb-$(GDB_VERSION).tar.gz
 SOURCES_DIR=gdb-src
 INSTALL_DIR=$(shell pwd)
 
-download: $(TAR_FILE_NAME)
-	test -f $(TAR_FILE_NAME) || wget http://ftp.gnu.org/gnu/gdb/gdb-$(GDB_VERSION).tar.gz -O $(TAR_FILE_NAME)
+$(TAR_FILE_NAME):
+	wget http://ftp.gnu.org/gnu/gdb/gdb-$(GDB_VERSION).tar.gz -O $(TAR_FILE_NAME)
 
-extract: download
+extract: $(TAR_FILE_NAME)
+	mkdir -p $(SOURCES_DIR)
 	tar -xvzf $(TAR_FILE_NAME) -C $(SOURCES_DIR)
 
 configure: extract
