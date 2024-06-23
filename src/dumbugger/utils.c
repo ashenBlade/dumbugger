@@ -21,6 +21,7 @@ int split_str(int length, const char *str, int *argc, char ***argv)
     int start = 0, cur = 0;
     while (cur < length)
     {
+        /* Пропускаем начальные пробелы */
         while (cur < length && isspace(str[cur]))
         {
             ++cur;
@@ -28,19 +29,22 @@ int split_str(int length, const char *str, int *argc, char ***argv)
 
         if (cur == length)
         {
+            /* В конце были только пробелы */
             break;
         }
 
         start = cur;
         cur++;
 
-        while (cur < length &&  !isspace(str[cur]))
+        /* Идем до следующих пробелов */
+        while (cur < length && !isspace(str[cur]))
         {
             ++cur;
         }
 
+        /* Выделяем место для новой строки */
         int new_str_len = cur - start + 1;
-        char *new_str = (char *)calloc(new_str_len, sizeof(char));
+        char *new_str = (char *) calloc(new_str_len, sizeof(char));
         if (new_str == NULL)
         {
             str_list_free(&list);
