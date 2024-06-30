@@ -14,6 +14,7 @@
 #include <sys/user.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include "debug_syms.h"
 #include "dis-asm.h"
@@ -361,8 +362,11 @@ static int breakpoint_equals_address_predicate(void *context,
 
 /*
  * Восстановить секцию кода, после того, как произошла остановка при полученном
- * SIGTRAP. Возвращаемые значения: -1 - ошибка 0 - точка останова не найдена
- * (возможно это пользовательская точка) 1 - успешно восстановлено
+ * SIGTRAP. Возвращаемые значения:
+ *
+ * -1 - ошибка
+ *  0 - точка останова не найдена (возможно это пользовательская точка)
+ *  1 - успешно восстановлено
  */
 static int restore_after_breakpoint(DumbuggerState *state) {
     /*
@@ -406,6 +410,45 @@ static int restore_after_breakpoint(DumbuggerState *state) {
     return 1;
 }
 
+/*
+ * Обработать остановку отслеживаемого процесса - проверить достижение точек
+ * останова
+ *
+ * Возвращаемые значения:
+ * -1 - ошибка
+ *  0 - точка останова не найдена
+ *  1 - точка останова успешно обработана
+ */
+static int handle_child_stopped(DumbuggerState *state) {
+    siginfo_t si;
+    if (ptrace(PTRACE_GETSIGINFO, state->pid, NULL, &si) == -1) {
+        return -1;
+    }
+
+    if (si.si_signo != SIGTRAP) {
+        return 0;
+    }
+
+    if (si.si_code == SI_KERNEL || si.si_code == TRAP_BRKPT) {
+        return restore_after_breakpoint(state);
+    }
+
+    /*
+     * Другой вариант - TRAP_TRACE, когда SINGLESTEP.
+     * От него восстанавливаться не надо.
+     * Случаи отличные от выше перечисленных не рассматриваю для простоты.
+     */
+    if (si.si_code == TRAP_TRACE) {
+        /*
+         * В случае SINGLESTEP возвращаем 1,
+         * чтобы выполнение процесса не продолжалось
+         */
+        return 1;
+    }
+
+    return 0;
+}
+
 int dmbg_wait(DumbuggerState *state) {
     if (state->state != PROCESS_STATE_RUNNING) {
         return 0;
@@ -421,23 +464,21 @@ int dmbg_wait(DumbuggerState *state) {
             return -1;
         }
 
-        if (WIFEXITED(state->wstatus)) {
+        if (WIFEXITED(state->wstatus) || WIFSIGNALED(state->wstatus)) {
             state->state = PROCESS_STATE_FINISHED;
             return 0;
         }
 
-        if (WIFBREAKPOINT(state->wstatus)) {
-            switch (restore_after_breakpoint(state)) {
-                case -1 /* ошибка */:
-                    return -1;
-                case 0 /* ложное срабатывание */:
-                    // break;
-                case 1 /* точка останова */:
-                    state->state = PROCESS_STATE_STOPPED;
-                    return 0;
-                default:
-                    assert(false);
-            }
+        switch (handle_child_stopped(state)) {
+            case -1 /* ошибка */:
+                return -1;
+            case 0 /* ложное срабатывание */:
+                break;
+            case 1 /* точка останова */:
+                state->state = PROCESS_STATE_STOPPED;
+                return 0;
+            default:
+                assert(false);
         }
 
         if (ptrace(PTRACE_CONT, state->pid, NULL, NULL) == -1) {
@@ -477,6 +518,24 @@ int dmbg_single_step_i(DumbuggerState *state) {
         return -1;
     }
 
+    if (waitpid(state->pid, &state->wstatus, 0) != state->pid) {
+        return -1;
+    }
+
+    if (WIFEXITED(state->wstatus) || WIFSIGNALED(state->wstatus)) {
+        state->state = PROCESS_STATE_FINISHED;
+        return 0;
+    }
+
+    /* 
+     * В данном случае не важно - точка останова или трейс.
+     * Мы останавливаемся в любом случае.
+     */
+    if (handle_child_stopped(state) == -1) {
+        return -1;
+    }
+
+    state->state = PROCESS_STATE_STOPPED;
     return 0;
 }
 
