@@ -185,12 +185,13 @@ static int list_assembler_cmd(program_state *state, int argc,
         return -1;
     }
 
-    dprintf(STDOUT_FILENO, "\n");
+    printf("\n");
     for (int i = 0; i < dump.length; i++) {
-        dprintf(STDOUT_FILENO, "%ld\t0x%08lx:\t%s\n", dump.insns[i].addr,
+        printf("0x%08lx:\t%s\n",
                 dump.insns[i].addr, dump.insns[i].str);
     }
-    dprintf(STDOUT_FILENO, "\n");
+    printf("\n");
+    fflush(stdout);
 
     if (dumb_assembly_dump_free(&dump) == -1) {
         return -1;

@@ -106,7 +106,7 @@ int dmbg_set_regs(DumbuggerState *state, Registers *regs);
  */
 typedef struct DumbuggerAssemblyDump {
     /*
-     * Длина массива as
+     * Длина массива инструкций (insns)
      */
     int length;
 #define DMBG_MAX_ASSEMBLY_STR_LEN 64

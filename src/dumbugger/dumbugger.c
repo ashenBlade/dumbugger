@@ -527,7 +527,7 @@ int dmbg_single_step_i(DumbuggerState *state) {
         return 0;
     }
 
-    /* 
+    /*
      * В данном случае не важно - точка останова или трейс.
      * Мы останавливаемся в любом случае.
      */
@@ -606,7 +606,8 @@ int dmbg_set_regs(DumbuggerState *state, Registers *regs) {
 typedef struct dumbugger_assembly_dump_buffer {
     /* Текущий индекс, который заполняется в dump */
     int insn_index;
-    /* Позиция в строке, начиная с которой необходимо записывать строку
+    /*
+     * Позиция в строке, начиная с которой необходимо записывать строку
      * ассемблера
      */
     int asm_str_index;
@@ -614,6 +615,11 @@ typedef struct dumbugger_assembly_dump_buffer {
     DumbuggerAssemblyDump *dump;
     /* pid отслеживаемого процесса */
     pid_t child_pid;
+    /*
+     * Служебное поле для отслеживания обработки dis_style_address_offset.
+     * С ним проблемы, см. fprintf_styled
+     */
+    bool in_addr_offset_process_state;
 } dumbugger_assembly_dump_buffer;
 
 static int fprintf_dumbugger_assembly_dump(void *stream, const char *fmt, ...) {
@@ -621,6 +627,7 @@ static int fprintf_dumbugger_assembly_dump(void *stream, const char *fmt, ...) {
     va_list argp;
     dumbugger_assembly_dump_buffer *buf =
         (dumbugger_assembly_dump_buffer *) stream;
+
     if (buf->dump->length <= buf->insn_index) {
         return -1;
     }
@@ -638,26 +645,124 @@ static int fprintf_dumbugger_assembly_dump(void *stream, const char *fmt, ...) {
         }
         buf->asm_str_index += written;
     }
+
     return 0;
+}
+
+static int write_cleanup_escape(char *buf, int buf_len, const char *fmt,
+                                va_list argp) {
+    /*
+     * libopcodes добавляет в результирующую строку управляющие символы
+     * в формате
+     * \002X\002, где X - любой символ.
+     * Это добавляет в вывод лишние символы и мешают. Поэтому удаляем эти
+     * последовательности. Как по другому их убрать - не знаю.
+     */
+
+    int written;
+
+    written = snprintf(buf, buf_len, fmt, argp);
+
+    if (written < 0) {
+        return -1;
+    }
+
+    int cur = 0;
+    while (cur < written) {
+        /*
+         * Тупой способ - находим первый '\' и удаляем 7 следующих символов
+         * включительно
+         */
+        if (buf[cur] != '\002') {
+            ++cur;
+            continue;
+        }
+
+        int to_move = written - cur - 3;
+        if (to_move <= 0) {
+            memset(buf + cur, 0, written - cur);
+            written -= written - cur;
+            break;
+        }
+
+        memmove(buf + cur, buf + cur + 3, to_move);
+        written -= 3;
+    }
+    buf[written] = '\0';
+    if (written == 1 && buf[0] == ')') {
+        /* Встречалась единственная закрывающая скобка - она не нужна */
+        return 0;
+    }
+    return written;
 }
 
 static int fprintf_styled_dumbugger_assembly_dump(void *stream,
                                                   enum disassembler_style style,
                                                   const char *fmt, ...) {
-    if (style == dis_style_text) {
-        /*
-         * Тут всякие управляющие последовательности и так далее.
-         * Они (как минимум у меня) не отображаются и мешают обзору
-         */
+    int res;
+    int written;
+    int current_length;
+    int left_space;
+    char temp_buf[64];
+    va_list argp;
+    dumbugger_assembly_dump_buffer *buf;
+
+    // if (style != dis_style_text || style != dis_style_mnemonic) {
+    /*
+     * Печатаем только необходимые символы
+     */
+    // return 0;
+    // }
+
+    buf = (dumbugger_assembly_dump_buffer *) stream;
+
+    if (buf->in_addr_offset_process_state) {
+        if (style == dis_style_register) {
+            buf->in_addr_offset_process_state = false;
+        }
+
+        return 0;
+    } else if (style == dis_style_address_offset) {
+        buf->in_addr_offset_process_state = true;
+    }
+
+    if (!(style == dis_style_mnemonic || style == dis_style_text)) {
         return 0;
     }
 
-    int res;
-    va_list argp;
+    if (buf->dump->length <= buf->insn_index) {
+        return -1;
+    }
+
+    memset(temp_buf, 0, sizeof(temp_buf));
     va_start(argp, fmt);
-    res = fprintf_dumbugger_assembly_dump(stream, fmt);
+    written = write_cleanup_escape(temp_buf, sizeof(temp_buf), fmt, argp);
     va_end(argp);
-    return res;
+
+    if (written == -1) {
+        return -1;
+    }
+
+    /* Если вернул 0, то оставшееся значение надо выбросить */
+    if (written == 0) {
+        return 0;
+    }
+
+    current_length = buf->asm_str_index;
+    left_space = sizeof(buf->dump->insns[buf->insn_index].str) - current_length;
+    if (left_space <= 0) {
+        return 0;
+    }
+
+    if (left_space < written) {
+        written = left_space;
+    }
+
+    strncpy(&buf->dump->insns[buf->insn_index].str[current_length], temp_buf,
+            written);
+
+    buf->asm_str_index += written;
+    return 0;
 }
 
 /* Function used to get bytes to disassemble.  MEMADDR is the
@@ -743,26 +848,26 @@ int dmbg_disassemble(DumbuggerState *state, int length,
     di.arch = bfd_arch_i386;
     di.mach = bfd_mach_x86_64;
     di.endian = BFD_ENDIAN_LITTLE;
+
+    di.disassembler_options = "att-mnemonic,att";
     disassemble_init_for_target(&di);
 
     di.read_memory_func = read_tracee_memory_func;
     di.buffer = NULL;
     di.buffer_length = 0;
     di.buffer_vma = 0;
-    di.disassembler_options = "att-mnemonic";
 
     disassembler_ftype disasmler =
         disassembler(di.arch, di.endian == BFD_ENDIAN_BIG, di.mach, NULL);
 
-    int left = length;
-    while (0 < left) {
+    while (buf.insn_index < length) {
         int processed = disasmler((bfd_vma) rip, &di);
         if (processed == -1) {
             return -1;
         }
         buf.dump->insns[buf.insn_index].addr = rip;
+        buf.dump->insns[buf.insn_index].str[buf.asm_str_index] = '\0';
         rip += processed;
-        --left;
         ++buf.insn_index;
         buf.asm_str_index = 0;
     }
