@@ -187,8 +187,7 @@ static int list_assembler_cmd(program_state *state, int argc,
 
     printf("\n");
     for (int i = 0; i < dump.length; i++) {
-        printf("0x%08lx:\t%s\n",
-                dump.insns[i].addr, dump.insns[i].str);
+        printf("0x%08lx:\t%s\n", dump.insns[i].addr, dump.insns[i].str);
     }
     printf("\n");
     fflush(stdout);
@@ -236,7 +235,7 @@ static int set_breakpoint_cmd(program_state *state, int argc,
         return 0;
     }
 
-    /* 
+    /*
      * Проверяем, что нам передали сырой адрес
      */
     const char *start_addr = argv[1];
@@ -255,15 +254,13 @@ static int set_breakpoint_cmd(program_state *state, int argc,
         }
         return 0;
     }
-    
-    /* 
+
+    /*
      * В противном случае, интерпретируем как название функции
      */
 
-    if (dmbg_set_breakpoint_function(state->dmbg_state, argv[1]) == -1)
-    {
-        if (errno == ENOENT)
-        {
+    if (dmbg_set_breakpoint_function(state->dmbg_state, argv[1]) == -1) {
+        if (errno == ENOENT) {
             printf("no such function: %s\n", argv[1]);
             return 0;
         }
@@ -279,6 +276,64 @@ static int continue_cmd(program_state *state, int argc, const char **argv) {
     }
 
     return 1;
+}
+
+static int get_run_context_cmd(program_state *state, int argc,
+                               const char **argv) {
+    char *line_buf;
+    int target_line_no;
+    if (dmbg_get_run_context(state->dmbg_state, &line_buf, &target_line_no) == -1)
+    {
+        return -1;
+    }
+
+    FILE *src_file = fopen(line_buf, "r");
+    if (src_file == NULL)
+    {
+        printf("could not open source file: %s\n", line_buf);
+        free(line_buf);
+        return 0;
+    }
+
+    free(line_buf);
+    ssize_t cur_line_len = 0;
+    size_t buf_len = 0;
+    int cur_line_no = 0;
+    int prefix_start_no = target_line_no - 4;
+    int suffix_end_no = target_line_no + 4;
+
+    while (0 < (cur_line_len = getline(&line_buf, &buf_len, src_file))) {
+        if (prefix_start_no <= cur_line_no && cur_line_no <= suffix_end_no)
+        {
+            if (cur_line_no == target_line_no)
+            {
+                printf("%d\t---> ", cur_line_no + 1);
+            } else {
+                printf("%d\t     ", cur_line_no + 1);
+            }
+
+            printf("%s", line_buf);
+        }
+        else if (suffix_end_no < cur_line_no)
+        {
+            break;
+        }
+
+        ++cur_line_no;
+    }
+
+    fclose(src_file);
+    if (line_buf != NULL)
+    {
+        free(line_buf);
+    }
+    
+    if (cur_line_len < 0 && errno != 0)
+    {
+        return -1;
+    }
+
+    return 0;
 }
 
 static CommandsRegistry *build_commands_registry() {
@@ -301,6 +356,7 @@ static CommandsRegistry *build_commands_registry() {
     CMDREG_ADD("bp", set_breakpoint_cmd);
     CMDREG_ADD("functions", functions_cmd);
     CMDREG_ADD("si", single_instruction_cmd);
+    CMDREG_ADD("src", get_run_context_cmd);
 
     return reg;
 }

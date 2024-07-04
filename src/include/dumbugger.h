@@ -138,9 +138,9 @@ int dumb_assembly_dump_free(DumbuggerAssemblyDump *dump);
  */
 int dmbg_set_breakpoint_addr(DumbuggerState *state, long addr);
 
-/* 
+/*
  * Поставить точку останова на указанную функцию.
- * 
+ *
  * Если эта функция не найдена, то возвращается -1 и errno равен ENOENT
  */
 int dmbg_set_breakpoint_function(DumbuggerState *state, const char *function);
@@ -155,12 +155,18 @@ int dmbg_remove_breakpoint(DumbuggerState *state, long addr);
  * При завершении необходимо вызвать dmbg_functions_free для освобождения
  * ресурсов
  */
-int dmbg_functions_get(DumbuggerState *state, const char ***functions,
+int dmbg_functions_get(DumbuggerState *state, char ***functions,
                        int *functions_count);
 
 /*
  * Освободить ресурсы выделенные для создания списка функций
  */
 int dmbg_function_list_free(const char **functions, int functions_count);
+
+
+/* 
+ * Получить информацию об исходном коде, исполняющего процесса
+ */
+int dmbg_get_run_context(DumbuggerState *state, char **filename, int *line_no);
 
 #endif

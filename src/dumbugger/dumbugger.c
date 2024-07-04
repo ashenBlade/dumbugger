@@ -87,7 +87,7 @@ struct DumbuggerState {
     /*
      * Отладочная информация процесса
      */
-    DebugInfo debug_info;
+    DebugInfo* debug_info;
 };
 
 static void run_child(const char **args) {
@@ -220,7 +220,7 @@ static int fill_debug_info(DumbuggerState *state, pid_t child_pid) {
     /*
      * Инициализируем отладочную информацию
      */
-    if (debug_syms_get(exe_path, &state->debug_info) == -1) {
+    if (debug_syms_init(exe_path, &state->debug_info) == -1) {
         return -1;
     }
 
@@ -931,22 +931,14 @@ int dmbg_set_breakpoint_function(DumbuggerState *state, const char *function) {
         return -1;
     }
 
-    FunctionInfo *info = NULL;
-
-    for (size_t i = 0; i < state->debug_info.functions_count; i++) {
-        FunctionInfo *cur_info = &state->debug_info.functions[i];
-        if (strcmp(cur_info->name, function) == 0) {
-            info = cur_info;
-            break;
-        }
-    }
-
-    if (info == NULL) {
+    long func_addr;
+    if (debug_syms_get_function_addr(state->debug_info, function, &func_addr) == 1)
+    {
         errno = ENOENT;
         return -1;
     }
 
-    long runtime_addr = state->load_addr + info->low_pc;
+    long runtime_addr = state->load_addr + func_addr;
     return set_breakpoint_at_addr(state, runtime_addr);
 }
 
@@ -984,26 +976,40 @@ int dmbg_remove_breakpoint(DumbuggerState *state, long addr) {
     return 0;
 }
 
-int dmbg_functions_get(DumbuggerState *state, const char ***functions,
+int dmbg_functions_get(DumbuggerState *state, char ***functions,
                        int *functions_count) {
-    STOPPED_PROCESS_GUARD(state);
-    const char **funcs_names = (const char **) calloc(
-        state->debug_info.functions_count, sizeof(char *));
-    if (funcs_names == NULL) {
-        return -1;
-    }
-
-    for (size_t i = 0; i < state->debug_info.functions_count; i++) {
-        funcs_names[i] = state->debug_info.functions[i].name;
-    }
-
-    *functions_count = state->debug_info.functions_count;
-    *functions = funcs_names;
-    return 0;
+    return debug_syms_get_all_function(state->debug_info, functions, functions_count);
 }
 
 int dmbg_function_list_free(const char **functions, int functions_count) {
     (void) functions_count;
     free((void *) functions);
+    return 0;
+}
+
+int dmbg_get_run_context(DumbuggerState *state, char **filename, int *line_no) {
+    STOPPED_PROCESS_GUARD(state);
+    long rip;
+    if (get_rip(state, &rip) == -1)
+    {
+        return -1;
+    }
+    
+
+    ContextInfo run_context;
+    if (debug_syms_context_info_get(state->debug_info, rip - state->load_addr, &run_context) == -1)
+    {
+        return -1;
+    }
+
+    *filename = strdup(run_context.src_filename);
+    *line_no = run_context.src_line;
+
+    if (debug_syms_context_info_free(&run_context) == -1)
+    {
+        free(*filename);
+        return -1;
+    }
+
     return 0;
 }
