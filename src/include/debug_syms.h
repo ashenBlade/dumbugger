@@ -14,8 +14,10 @@ int debug_syms_get_all_function(DebugInfo *debug_info, char ***functions, int *f
 
 int debug_syms_get_function_addr(DebugInfo *debug_info, const char *func_name, long *addr);
 
-int debug_syms_context_info_get(DebugInfo *debug_info, 
-                                long addr,
+int debug_syms_get_address_at_line(DebugInfo *debug_info, const char *filename,
+                               int line_no, long *addr);
+
+int debug_syms_context_info_get(DebugInfo *debug_info, long addr,
                                 ContextInfo *context);
 
 int debug_syms_context_info_free(ContextInfo *info);

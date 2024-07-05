@@ -162,8 +162,28 @@ static int fill_functions_info_recurse(Dwarf_Die cu_die, Dwarf_Error *err,
 /* Предикат поиска function_info по совпадению названия */
 static int function_info_by_name_equal_predicate(void *context, function_info *fi)
 {
-    char *name = (char *) context;
-    if (strcmp(fi->name, name) == 0)
+    /* 
+     * В символах отладки хранится полный путь до файла, а нам передается,
+     * скорее всего, только название файла, без всего пути.
+     * Для нахождения
+     */
+    char *target_name = (char *) context;
+    int target_name_len = strlen(target_name);
+    int src_filename_len = strlen(fi->decl_filename);
+    
+    /* 
+     * Длина пути указанного файла не может быть 
+     * больше длины пути файла исходного кода 
+     */
+    if (src_filename_len < target_name_len)
+    {
+        return 0;
+    }
+
+    /* 
+     * Сравнивать надо только конец строк
+     */
+    if (strcmp(fi->decl_filename + src_filename_len - target_name_len, target_name) == 0)
     {
         return 1;
     }
@@ -428,6 +448,34 @@ int debug_syms_get_function_addr(DebugInfo *debug_info, const char *func_name,
     }
 
     return 1;
+}
+
+static int source_line_by_logical_line_predicate(void *context, source_line_info *sli)
+{
+    if (sli->logical_line_no == (Dwarf_Unsigned)context)
+    {
+        return 1;
+    }
+    return 0;
+}
+
+int debug_syms_get_address_at_line(DebugInfo *debug_info,
+                                   const char *filename, int line_no,
+                                   long *addr) {
+    function_info *fi;
+    if (func_info_list_contains(&debug_info->functions, function_info_by_name_equal_predicate, (void*) filename, &fi) == 0)
+    {
+        return 1;
+    }
+
+    source_line_info *sli;
+    if (source_line_list_contains(&fi->src_lines, source_line_by_logical_line_predicate, (void*)(Dwarf_Unsigned)line_no, &sli) == 0)
+    {
+        return 1;
+    }
+
+    *addr = sli->addr;
+    return 0;
 }
 
 int debug_syms_context_info_get(DebugInfo *debug_info, long addr,

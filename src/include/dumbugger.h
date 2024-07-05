@@ -145,6 +145,16 @@ int dmbg_set_breakpoint_addr(DumbuggerState *state, long addr);
  */
 int dmbg_set_breakpoint_function(DumbuggerState *state, const char *function);
 
+/* 
+ * Поставить точку останова в файле на строке.
+ * Нумерация строк с 1.
+ * 
+ * Если по указанной строке нельзя поставить точку останова (функции нет),
+ * то возвращается -1 и errno равен ENOENT
+ */
+int dmbg_set_breakpoint_src_file(DumbuggerState *state, const char *filename,
+                                 int src_line_no);
+
 /*
  * Удалить точку останова по указанному адресу
  */
@@ -161,12 +171,13 @@ int dmbg_functions_get(DumbuggerState *state, char ***functions,
 /*
  * Освободить ресурсы выделенные для создания списка функций
  */
-int dmbg_function_list_free(const char **functions, int functions_count);
+int dmbg_function_list_free(char **functions, int functions_count);
 
 
 /* 
  * Получить информацию об исходном коде, исполняющего процесса
  */
 int dmbg_get_run_context(DumbuggerState *state, char **filename, int *line_no);
+
 
 #endif

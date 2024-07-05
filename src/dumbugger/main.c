@@ -63,7 +63,7 @@ static int show_regs_cmd(program_state *state, int argc, const char **argv) {
 }
 
 static int functions_cmd(program_state *state, int argc, const char **argv) {
-    const char **functions;
+    char **functions;
     int functions_count;
     if (dmbg_functions_get(state->dmbg_state, &functions, &functions_count) ==
         -1) {
@@ -231,40 +231,87 @@ static int stop_running_process_cmd(program_state *state, int argc,
 static int set_breakpoint_cmd(program_state *state, int argc,
                               const char **argv) {
     if (argc != 2) {
-        printf("breakpoint address not specified\n");
+        printf("breakpoint location not specified\n");
         return 0;
     }
-
+    const char *location = argv[1];
     /*
      * Проверяем, что нам передали сырой адрес
      */
-    const char *start_addr = argv[1];
-    if (strncmp(start_addr, "0x", 2) == 0 ||
-        strncmp(start_addr, "0X", 2) == 0) {
-        start_addr += 2;
+    {
+        const char *start_addr = location;
+        if (strncmp(start_addr, "0x", 2) == 0 ||
+            strncmp(start_addr, "0X", 2) == 0) {
+            start_addr += 2;
+        }
+
+        errno = 0;
+        char *end_ptr = NULL;
+        long addr = strtol(start_addr, &end_ptr, 16);
+        if (end_ptr != start_addr && errno == 0) {
+            if (dmbg_set_breakpoint_addr(state->dmbg_state, addr) == -1) {
+                printf("error setting breakpoint: %s\n", strerror(errno));
+                return -1;
+            }
+            return 0;
+        }
     }
 
-    errno = 0;
-    char *end_ptr = NULL;
-    long addr = strtol(start_addr, &end_ptr, 16);
-    if (end_ptr != start_addr && errno == 0) {
-        if (dmbg_set_breakpoint_addr(state->dmbg_state, addr) == -1) {
-            printf("bp error: %s\n", strerror(errno));
-            return -1;
+    /* 
+     * Если есть ':', то строка в формате 'filename:line'.
+     * Пытаемся поставить точку останова на указанную строку в файле
+     */
+    { 
+        char *colon_ptr = strchr(argv[1], ':'); 
+        if (colon_ptr != NULL)
+        {
+            char *end_ptr = NULL;
+            errno = 0;
+            long line_no = strtol(colon_ptr + 1, &end_ptr, 10);
+            if (*end_ptr != '\0')
+            {
+                printf("error parsing line number: %s\n", colon_ptr + 1);
+                return 0;
+            }
+
+            if (line_no < 1)
+            {
+                printf("line number must be positive\n");
+                return 0;
+            }
+
+            int filename_len = (int) (colon_ptr - location + 1);
+            char *filename = malloc(filename_len);
+            strncpy(filename, location, filename_len);
+            filename[filename_len - 1] = '\0';
+            errno = 0;
+            if (dmbg_set_breakpoint_src_file(state->dmbg_state, filename,
+                                             (int) line_no) == -1) {
+                free(filename);
+                if (errno == ENOENT) {
+                    printf("file \"%s\" not found\n", filename);
+                    return 0;
+                }
+
+                printf("error setting breakpoint: %s\n", strerror(errno));
+                return -1;
+            }
+            free(filename);
+            return 0;
         }
-        return 0;
     }
 
     /*
      * В противном случае, интерпретируем как название функции
      */
-
-    if (dmbg_set_breakpoint_function(state->dmbg_state, argv[1]) == -1) {
-        if (errno == ENOENT) {
-            printf("no such function: %s\n", argv[1]);
-            return 0;
+    {
+        if (dmbg_set_breakpoint_function(state->dmbg_state, argv[1]) == -1) {
+            if (errno == ENOENT) {
+                printf("no such function: %s\n", argv[1]);
+                return 0;
+            }
+            return -1;
         }
-        return -1;
     }
 
     return 0;
@@ -278,8 +325,8 @@ static int continue_cmd(program_state *state, int argc, const char **argv) {
     return 1;
 }
 
-static int get_run_context_cmd(program_state *state, int argc,
-                               const char **argv) {
+static int show_src_lines_cmd(program_state *state, int argc,
+                                const char **argv) {
     char *line_buf;
     int target_line_no;
     if (dmbg_get_run_context(state->dmbg_state, &line_buf, &target_line_no) == -1)
@@ -305,7 +352,7 @@ static int get_run_context_cmd(program_state *state, int argc,
     while (0 < (cur_line_len = getline(&line_buf, &buf_len, src_file))) {
         if (prefix_start_no <= cur_line_no && cur_line_no <= suffix_end_no)
         {
-            if (cur_line_no == target_line_no)
+            if (cur_line_no == target_line_no - 1)
             {
                 printf("%d\t---> ", cur_line_no + 1);
             } else {
@@ -321,7 +368,8 @@ static int get_run_context_cmd(program_state *state, int argc,
 
         ++cur_line_no;
     }
-
+    printf("\n");
+    fflush(stdout);
     fclose(src_file);
     if (line_buf != NULL)
     {
@@ -356,7 +404,7 @@ static CommandsRegistry *build_commands_registry() {
     CMDREG_ADD("bp", set_breakpoint_cmd);
     CMDREG_ADD("functions", functions_cmd);
     CMDREG_ADD("si", single_instruction_cmd);
-    CMDREG_ADD("src", get_run_context_cmd);
+    CMDREG_ADD("src", show_src_lines_cmd);
 
     return reg;
 }
