@@ -46,6 +46,15 @@ static int single_instruction_cmd(program_state *state, int argc,
     return 0;
 }
 
+static int single_src_line_step_cmd(program_state *state, int argc, const char **argv)
+{
+    if (dmbg_single_step_src(state->dmbg_state) == -1)
+    {
+        return -1;
+    }
+    return 0;
+}
+
 static int show_regs_cmd(program_state *state, int argc, const char **argv) {
     Registers regs;
     if (dmbg_get_regs(state->dmbg_state, &regs) == -1) {
@@ -405,6 +414,8 @@ static CommandsRegistry *build_commands_registry() {
     CMDREG_ADD("functions", functions_cmd);
     CMDREG_ADD("si", single_instruction_cmd);
     CMDREG_ADD("src", show_src_lines_cmd);
+    CMDREG_ADD("s", single_src_line_step_cmd);
+    CMDREG_ADD("step", single_src_line_step_cmd);
 
     return reg;
 }

@@ -68,6 +68,11 @@ int dmbg_continue(DumbuggerState *state);
  */
 int dmbg_single_step_i(DumbuggerState *state);
 
+/* 
+ * Выполнить одну строку исходного кода (step in)
+ */
+int dmbg_single_step_src(DumbuggerState *state);
+
 /* Структура, представляющая регистры процессора */
 typedef struct Registers {
     unsigned long long int r8;

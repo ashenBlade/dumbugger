@@ -511,9 +511,8 @@ int dmbg_continue(DumbuggerState *state) {
     return 0;
 }
 
-int dmbg_single_step_i(DumbuggerState *state) {
-    STOPPED_PROCESS_GUARD(state);
-
+static int make_single_instruction_step(DumbuggerState *state)
+{
     if (ptrace(PTRACE_SINGLESTEP, state->pid, NULL, NULL) == -1) {
         return -1;
     }
@@ -524,7 +523,7 @@ int dmbg_single_step_i(DumbuggerState *state) {
 
     if (WIFEXITED(state->wstatus) || WIFSIGNALED(state->wstatus)) {
         state->state = PROCESS_STATE_FINISHED;
-        return 0;
+        return 1;
     }
 
     /*
@@ -537,6 +536,71 @@ int dmbg_single_step_i(DumbuggerState *state) {
 
     state->state = PROCESS_STATE_STOPPED;
     return 0;
+}
+
+int dmbg_single_step_i(DumbuggerState *state) {
+    STOPPED_PROCESS_GUARD(state);
+    switch (make_single_instruction_step(state))
+    {
+        case 1:
+        case 0:
+            return 0;
+        default /* case -1 */:
+            return -1;
+    }
+}
+
+int dmbg_single_step_src(DumbuggerState *state) {
+    STOPPED_PROCESS_GUARD(state);
+
+    long rip;
+    if (get_rip(state, &rip) == -1)
+    {
+        return -1;
+    }
+
+    ContextInfo prev_ci;
+    if (debug_syms_context_info_get(state->debug_info, rip - state->load_addr, &prev_ci) == -1)
+    {
+        return -1;
+    }
+
+    /* Выполняем по 1 инструкции до тех пор, пока информация о контексте не поменяется */
+    while (true)
+    {
+        switch (make_single_instruction_step(state))
+        {
+            case 1:
+                debug_syms_context_info_free(&prev_ci);
+                return 0;
+            case -1:
+                debug_syms_context_info_free(&prev_ci);
+                return -1;
+        }
+
+        if (get_rip(state, &rip) == -1)
+        {
+            debug_syms_context_info_free(&prev_ci);
+            return -1;
+        }
+
+        ContextInfo cur_ci;
+        if (debug_syms_context_info_get(state->debug_info, rip - state->load_addr, &cur_ci) == -1) {
+            debug_syms_context_info_free(&prev_ci);
+            return -1;
+        } 
+        
+        /* Может случиться так, что вызываем функцию из другого файла, но номера строк одинаковые будут */
+        if (cur_ci.src_line != prev_ci.src_line || strcmp(cur_ci.src_filename, prev_ci.src_filename) != 0)
+        {
+            debug_syms_context_info_free(&prev_ci);
+            debug_syms_context_info_free(&cur_ci);
+            return 0;
+        }
+
+        debug_syms_context_info_free(&prev_ci);
+        memcpy(&prev_ci, &cur_ci, sizeof(ContextInfo));
+    };
 }
 
 int dmbg_get_regs(DumbuggerState *state, Registers *regs) {

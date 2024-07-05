@@ -525,6 +525,7 @@ int debug_syms_context_info_get(DebugInfo *debug_info, long addr,
 
         context->src_filename = strdup(fi->decl_filename);
         context->src_line = (int) most_likely_sli->logical_line_no;
+        
         return 0;
     }
 
