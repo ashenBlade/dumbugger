@@ -160,7 +160,7 @@ static int fill_functions_info_recurse(Dwarf_Die cu_die, Dwarf_Error *err,
 }
 
 /* Предикат поиска function_info по совпадению названия */
-static int function_info_by_name_equal_predicate(void *context, function_info *fi)
+static int function_info_by_decl_filename_equal_predicate(void *context, function_info *fi)
 {
     /* 
      * В символах отладки хранится полный путь до файла, а нам передается,
@@ -438,11 +438,21 @@ int debug_syms_get_all_function(DebugInfo *debug_info, char ***functions, int *f
     return 0;
 }
 
+static int function_info_by_name_equal_predicate(void *context, function_info *fi)
+{
+    if (strcmp((const char*)context, fi->name) == 0)
+    {
+        return 1;
+    }
+    return 0;
+}
+
 int debug_syms_get_function_addr(DebugInfo *debug_info, const char *func_name,
                                  long *addr) {
     function_info *fi;
-    if (func_info_list_contains(&debug_info->functions, function_info_by_name_equal_predicate, (void*)func_name, &fi) == 1)
-    {
+    if (func_info_list_contains(&debug_info->functions,
+                                function_info_by_name_equal_predicate,
+                                (void *) func_name, &fi) == 1) {
         *addr = fi->low_pc;
         return 0;
     }
@@ -463,7 +473,7 @@ int debug_syms_get_address_at_line(DebugInfo *debug_info,
                                    const char *filename, int line_no,
                                    long *addr) {
     function_info *fi;
-    if (func_info_list_contains(&debug_info->functions, function_info_by_name_equal_predicate, (void*) filename, &fi) == 0)
+    if (func_info_list_contains(&debug_info->functions, function_info_by_decl_filename_equal_predicate, (void*) filename, &fi) == 0)
     {
         return 1;
     }

@@ -184,5 +184,15 @@ int dmbg_function_list_free(char **functions, int functions_count);
  */
 int dmbg_get_run_context(DumbuggerState *state, char **filename, int *line_no);
 
+typedef enum DmbgStatus {
+    DMBG_STATUS_RUNNING,
+    DMBG_STATUS_STOPPED,
+    DMBG_STATUS_FINISHED
+} DmbgStatus;
+
+/* 
+ * Получить текущий статус отслеживаемого процесса
+ */
+DmbgStatus dmbg_status(DumbuggerState *state);
 
 #endif

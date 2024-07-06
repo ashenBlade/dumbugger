@@ -46,10 +46,14 @@ static int single_instruction_cmd(program_state *state, int argc,
     return 0;
 }
 
-static int single_src_line_step_cmd(program_state *state, int argc, const char **argv)
-{
-    if (dmbg_single_step_src(state->dmbg_state) == -1)
-    {
+static int single_src_line_step_cmd(program_state *state, int argc,
+                                    const char **argv) {
+    if (dmbg_single_step_src(state->dmbg_state) == -1) {
+        if (errno == ENOENT) {
+            printf("no source line found for current instruction\n");
+            return 0;
+        }
+
         return -1;
     }
     return 0;
@@ -266,25 +270,22 @@ static int set_breakpoint_cmd(program_state *state, int argc,
         }
     }
 
-    /* 
+    /*
      * Если есть ':', то строка в формате 'filename:line'.
      * Пытаемся поставить точку останова на указанную строку в файле
      */
-    { 
-        char *colon_ptr = strchr(argv[1], ':'); 
-        if (colon_ptr != NULL)
-        {
+    {
+        char *colon_ptr = strchr(argv[1], ':');
+        if (colon_ptr != NULL) {
             char *end_ptr = NULL;
             errno = 0;
             long line_no = strtol(colon_ptr + 1, &end_ptr, 10);
-            if (*end_ptr != '\0')
-            {
+            if (*end_ptr != '\0') {
                 printf("error parsing line number: %s\n", colon_ptr + 1);
                 return 0;
             }
 
-            if (line_no < 1)
-            {
+            if (line_no < 1) {
                 printf("line number must be positive\n");
                 return 0;
             }
@@ -335,17 +336,21 @@ static int continue_cmd(program_state *state, int argc, const char **argv) {
 }
 
 static int show_src_lines_cmd(program_state *state, int argc,
-                                const char **argv) {
+                              const char **argv) {
     char *line_buf;
     int target_line_no;
-    if (dmbg_get_run_context(state->dmbg_state, &line_buf, &target_line_no) == -1)
-    {
+    if (dmbg_get_run_context(state->dmbg_state, &line_buf, &target_line_no) ==
+        -1) {
+        if (errno == ENOENT)
+        {
+            printf("no source file found for current instruction\n");
+            return 0;
+        }
         return -1;
     }
 
     FILE *src_file = fopen(line_buf, "r");
-    if (src_file == NULL)
-    {
+    if (src_file == NULL) {
         printf("could not open source file: %s\n", line_buf);
         free(line_buf);
         return 0;
@@ -359,19 +364,15 @@ static int show_src_lines_cmd(program_state *state, int argc,
     int suffix_end_no = target_line_no + 4;
 
     while (0 < (cur_line_len = getline(&line_buf, &buf_len, src_file))) {
-        if (prefix_start_no <= cur_line_no && cur_line_no <= suffix_end_no)
-        {
-            if (cur_line_no == target_line_no - 1)
-            {
+        if (prefix_start_no <= cur_line_no && cur_line_no <= suffix_end_no) {
+            if (cur_line_no == target_line_no - 1) {
                 printf("%d\t---> ", cur_line_no + 1);
             } else {
                 printf("%d\t     ", cur_line_no + 1);
             }
 
             printf("%s", line_buf);
-        }
-        else if (suffix_end_no < cur_line_no)
-        {
+        } else if (suffix_end_no < cur_line_no) {
             break;
         }
 
@@ -380,13 +381,11 @@ static int show_src_lines_cmd(program_state *state, int argc,
     printf("\n");
     fflush(stdout);
     fclose(src_file);
-    if (line_buf != NULL)
-    {
+    if (line_buf != NULL) {
         free(line_buf);
     }
-    
-    if (cur_line_len < 0 && errno != 0)
-    {
+
+    if (cur_line_len < 0 && errno != 0) {
         return -1;
     }
 
@@ -426,10 +425,8 @@ static int process_user_input(program_state *state) {
 
     while (true) {
         /* Читаем команду пользователя - чистая строка */
-        if (write(STDOUT_FILENO, DMBG_USER_PROMPT, sizeof(DMBG_USER_PROMPT)) ==
-            -1) {
-            return 1;
-        }
+        printf(DMBG_USER_PROMPT);
+        fflush(stdout);
 
         do {
             memset(buf, '\0', sizeof(buf));
@@ -521,6 +518,7 @@ int main(int argc, const char **argv) {
     };
 
     while (true) {
+        fflush(stdout);
         if (dmbg_wait(dmbg) == -1) {
             perror("dmbg_wait");
             return 1;
@@ -538,10 +536,16 @@ int main(int argc, const char **argv) {
         }
 
         if (process_user_input(&prog_state) == -1) {
+            if (dmbg_status(dmbg) == DMBG_STATUS_FINISHED) {
+                printf("program finished execution\n");
+                break;
+            }
+
             printf("error processing command: %s\n", strerror(errno));
             return 1;
         }
     }
+    fflush(stdout);
 
     if (dmbg_stop(dmbg) == -1) {
         perror("dmbg_stop");

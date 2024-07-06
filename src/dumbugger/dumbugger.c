@@ -562,6 +562,7 @@ int dmbg_single_step_src(DumbuggerState *state) {
     ContextInfo prev_ci;
     if (debug_syms_context_info_get(state->debug_info, rip - state->load_addr, &prev_ci) == -1)
     {
+        errno = ENOENT;
         return -1;
     }
 
@@ -587,6 +588,7 @@ int dmbg_single_step_src(DumbuggerState *state) {
         ContextInfo cur_ci;
         if (debug_syms_context_info_get(state->debug_info, rip - state->load_addr, &cur_ci) == -1) {
             debug_syms_context_info_free(&prev_ci);
+            errno = ENOENT;
             return -1;
         } 
         
@@ -1085,8 +1087,8 @@ int dmbg_get_run_context(DumbuggerState *state, char **filename, int *line_no) {
     }
 
     ContextInfo run_context;
-    if (debug_syms_context_info_get(state->debug_info, rip - state->load_addr,
-                                    &run_context) == -1) {
+    if (debug_syms_context_info_get(state->debug_info, rip - state->load_addr, &run_context) == -1) {
+        errno = ENOENT;
         return -1;
     }
 
@@ -1099,4 +1101,17 @@ int dmbg_get_run_context(DumbuggerState *state, char **filename, int *line_no) {
     }
 
     return 0;
+}
+
+DmbgStatus dmbg_status(DumbuggerState *state) { 
+    switch (state->state)
+    {
+        case PROCESS_STATE_RUNNING:
+            return DMBG_STATUS_RUNNING;
+        case PROCESS_STATE_STOPPED:
+            return DMBG_STATUS_STOPPED;
+        case PROCESS_STATE_FINISHED:
+            return DMBG_STATUS_FINISHED;
+    }
+    return -1; 
 }
