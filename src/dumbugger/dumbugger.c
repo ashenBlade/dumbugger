@@ -155,6 +155,13 @@ static int get_load_addr(pid_t pid, const char *exe_name, long *load_addr) {
         return -1;
     }
 
+    /* 
+     * Формат файла:
+     * start-end    flags   offset  major_id:minor_id   inode_id    file_path
+     * 
+     * Нам нужно получить первый 'start', у которого file_path равен exe_name,
+     * т.е. бинарю запускаемого процесса
+     */
     while (fscanf(maps_file, "%lx-%*x %*c%*c%*c%*c %*d %*d:%*d %*d%*c %s",
                   &start, filepath) == 2) {
         if (strcmp(filepath, exe_name) != 0) {
@@ -339,6 +346,9 @@ int dmbg_free(DumbuggerState *state) {
         return -1;
     }
 
+    debug_syms_free(state->debug_info);
+    free(state->exe_path);
+    bp_list_free(&state->breakpoints);
     memset(state, 0, sizeof(DumbuggerState));
     free(state);
     return 0;
@@ -773,13 +783,6 @@ static int fprintf_styled_dumbugger_assembly_dump(void *stream,
     va_list argp;
     dumbugger_assembly_dump_buffer *buf;
 
-    // if (style != dis_style_text || style != dis_style_mnemonic) {
-    /*
-     * Печатаем только необходимые символы
-     */
-    // return 0;
-    // }
-
     buf = (dumbugger_assembly_dump_buffer *) stream;
 
     if (buf->in_addr_offset_process_state) {
@@ -1075,6 +1078,9 @@ int dmbg_functions_get(DumbuggerState *state, char ***functions,
 
 int dmbg_function_list_free(char **functions, int functions_count) {
     (void) functions_count;
+    for (int i = 0; i < functions_count; ++i) {
+        free(functions[i]);
+    }
     free((void *) functions);
     return 0;
 }

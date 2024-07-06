@@ -34,6 +34,7 @@ static int print_help_cmd(program_state *state, int argc, const char **argv) {
         "list [N]\t\t- show next N assembler instructions, 5 by default\n"
         "functions show\t\t- show functions in process \n"
         "continue\t\t- continue execution\n");
+    /* TODO: добавить команды сюда */
     return 0;
 }
 
@@ -341,8 +342,7 @@ static int show_src_lines_cmd(program_state *state, int argc,
     int target_line_no;
     if (dmbg_get_run_context(state->dmbg_state, &line_buf, &target_line_no) ==
         -1) {
-        if (errno == ENOENT)
-        {
+        if (errno == ENOENT) {
             printf("no source file found for current instruction\n");
             return 0;
         }
@@ -419,6 +419,13 @@ static CommandsRegistry *build_commands_registry() {
     return reg;
 }
 
+static void free_argv(char **argv, int argc) {
+    for (int i = 0; i < argc; ++i) {
+        free(argv[i]);
+    }
+    free(argv);
+}
+
 static int process_user_input(program_state *state) {
     char buf[1024];
     int input_len;
@@ -463,14 +470,19 @@ static int process_user_input(program_state *state) {
         command_func cmd = cmdreg_find(state->cmdreg, argv[0]);
         if (cmd == NULL) {
             printf("unknown command: %s\n", argv[0]);
+            free_argv(argv, argc);
             continue;
         }
 
         int result = cmd((void *) state, argc, argv);
+
+        free_argv(argv, argc);
+
         /*
          * -1 - ошибка
-         *  1 - следует завершить обработку команд (работа продолжилась, single
-         * step и т.д.) 0 - продолжаем обрабатывать команды пользователя
+         *  1 - следует завершить обработку команд (работа продолжилась,
+         * single step и т.д.) 0 - продолжаем обрабатывать команды
+         * пользователя
          */
         if (result == -1) {
             return -1;
@@ -545,7 +557,13 @@ int main(int argc, const char **argv) {
             return 1;
         }
     }
+
     fflush(stdout);
+
+    if (cmdreg_free(reg) == -1) {
+        perror("cmdreg_free");
+        return 1;
+    }
 
     if (dmbg_stop(dmbg) == -1) {
         perror("dmbg_stop");

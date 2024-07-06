@@ -159,32 +159,24 @@ static int fill_functions_info_recurse(Dwarf_Die cu_die, Dwarf_Error *err,
     return 0;
 }
 
-/* Предикат поиска function_info по совпадению названия */
-static int function_info_by_decl_filename_equal_predicate(void *context, function_info *fi)
+/* Проверить что suffix является суффиксом строки str */
+static int is_suffix(const char *str, const char *suffix)
 {
-    /* 
-     * В символах отладки хранится полный путь до файла, а нам передается,
-     * скорее всего, только название файла, без всего пути.
-     * Для нахождения
+    int suffix_len = strlen(suffix);
+    int str_len = strlen(str);
+
+    /*
+     * Длина пути указанного файла не может быть
+     * больше длины пути файла исходного кода
      */
-    char *target_name = (char *) context;
-    int target_name_len = strlen(target_name);
-    int src_filename_len = strlen(fi->decl_filename);
-    
-    /* 
-     * Длина пути указанного файла не может быть 
-     * больше длины пути файла исходного кода 
-     */
-    if (src_filename_len < target_name_len)
-    {
+    if (str_len < suffix_len) {
         return 0;
     }
 
-    /* 
+    /*
      * Сравнивать надо только конец строк
      */
-    if (strcmp(fi->decl_filename + src_filename_len - target_name_len, target_name) == 0)
-    {
+    if (strcmp(str + str_len - suffix_len, suffix) == 0) {
         return 1;
     }
 
@@ -218,13 +210,16 @@ static int debug_syms_fill_debug_info(Dwarf_Debug dbg, Dwarf_Error *err,
     Dwarf_Bool is_info = true;
 
     /* 
-     * Заполняем общую информацию о функциях 
+     * Заполняем общую информацию о функциях
      */
     while (true) {
         Dwarf_Half tag;
         Dwarf_Die cu_die;
         Dwarf_Die cu_child;
 
+        /* 
+         * Заполняем информацию из текущего compilation unit
+         */
         res = dwarf_next_cu_header_e(
             dbg, is_info, &cu_die, &header_length, &version, &abbrev_offset,
             &address_size, &length_size, &extension_size, &sig, &type_offset,
@@ -257,6 +252,14 @@ static int debug_syms_fill_debug_info(Dwarf_Debug dbg, Dwarf_Error *err,
             if (fill_functions_info_recurse(cu_child, err, info) == -1) {
                 return -1;
             }
+        } else {
+            /* 
+             * Нет смысла заполнять информацию далее, т.к. 
+             * текущий CU не найден. Нового ничего не добавим
+             * */
+            dwarf_dealloc_die(cu_child);
+            dwarf_dealloc_die(cu_die);
+            continue;
         }
 
         /* 
@@ -289,7 +292,10 @@ static int debug_syms_fill_debug_info(Dwarf_Debug dbg, Dwarf_Error *err,
             return -1;
         }
 
-        /* кэшируем последний function_info, чтобы заново не искать каждый раз */
+        /* 
+         * Кэшируем последний function_info, чтобы заново не искать каждый раз.
+         * Т.к. строки идут последовательно и мы скорее всего окажемся в той же функции
+         */
         function_info *cached_fi = NULL;
 
         for (i = base_index; i < end_index; i++) {
@@ -340,9 +346,7 @@ static int debug_syms_fill_debug_info(Dwarf_Debug dbg, Dwarf_Error *err,
                 if (cached_fi != NULL && FUNC_INFO_CONTAINS_INSTRUCTION(cached_fi, line_addr))
                 {
                     cur_line_fi = cached_fi;
-                }
-                else
-                {
+                } else {
                     func_info_list_contains(
                         &info->functions,
                         function_info_contains_address_predicate,
@@ -351,7 +355,10 @@ static int debug_syms_fill_debug_info(Dwarf_Debug dbg, Dwarf_Error *err,
 
                 if (cur_line_fi == NULL)
                 {
-                    /* Не нашли подходящей функции, такое может быть если функция объявлена не нами */
+                    /* 
+                     * Не нашли подходящей функции. Такое может быть если функция 
+                     * объявлена не нами. Например, взята из заголовочного файла.
+                     */
                     continue;
                 }
 
@@ -366,6 +373,9 @@ static int debug_syms_fill_debug_info(Dwarf_Debug dbg, Dwarf_Error *err,
                      * файла исходника ранее
                      */
                     cur_line_fi->decl_filename = strdup(src_filename);
+                    if (cur_line_fi->decl_filename == NULL) {
+                        return -1;
+                    }
                 }
 
                 if (source_line_list_add(&cur_line_fi->src_lines, &sli) == -1)
@@ -392,7 +402,12 @@ int debug_syms_init(const char *filename, DebugInfo **debug_info) {
     }
 
     DebugInfo *info = calloc(1, sizeof(DebugInfo));
+    if (info == NULL) {
+        return -1;
+    }
+    
     if (debug_syms_fill_debug_info(dbg, &err, info) == -1) {
+        dwarf_finish(dbg);
         free(info);
         return -1;
     }
@@ -473,19 +488,26 @@ int debug_syms_get_address_at_line(DebugInfo *debug_info,
                                    const char *filename, int line_no,
                                    long *addr) {
     function_info *fi;
-    if (func_info_list_contains(&debug_info->functions, function_info_by_decl_filename_equal_predicate, (void*) filename, &fi) == 0)
-    {
-        return 1;
+    foreach (fi, &debug_info->functions) {
+        /*
+         * В символах отладки хранится полный путь до файла, а нам передается,
+         * скорее всего, только название файла, без всего пути.
+         */
+        if (is_suffix(fi->decl_filename, filename) == 0) {
+            continue;
+        }
+
+        source_line_info *sli;
+        if (source_line_list_contains(&fi->src_lines, source_line_by_logical_line_predicate, (void*)(Dwarf_Unsigned)line_no, &sli) == 0)
+        {
+            continue;
+        }
+
+        *addr = sli->addr;
+        return 0;
     }
 
-    source_line_info *sli;
-    if (source_line_list_contains(&fi->src_lines, source_line_by_logical_line_predicate, (void*)(Dwarf_Unsigned)line_no, &sli) == 0)
-    {
-        return 1;
-    }
-
-    *addr = sli->addr;
-    return 0;
+    return 1;
 }
 
 int debug_syms_context_info_get(DebugInfo *debug_info, long addr,
@@ -552,10 +574,12 @@ int debug_syms_free(DebugInfo *debug_info) {
     function_info *fi;
     foreach (fi, &debug_info->functions)
     {
-        free((void*)fi->name);
+        free(fi->name);
+        free(fi->decl_filename);
         source_line_list_free(&fi->src_lines);
     }
 
     func_info_list_free(&debug_info->functions);
+    free(debug_info);
     return -1;
 }

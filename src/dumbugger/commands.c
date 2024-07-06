@@ -16,7 +16,6 @@ LIST_DEFINE(command, cmd_list)
 
 struct CommandsRegistry
 {
-    bool init;
     cmd_list list;
 };
 
@@ -28,6 +27,7 @@ CommandsRegistry *cmdreg_new()
         return NULL;
     }
     memset(reg, 0, sizeof(CommandsRegistry));
+    cmd_list_init(&reg->list);
     return reg;
 }
 
@@ -38,16 +38,12 @@ int cmdreg_free(CommandsRegistry *reg)
         return 0;
     }
 
-    if (!reg->init)
-    {
-        return 0;
-    }
-
     if (cmd_list_free(&reg->list) == -1)
     {
         return -1;
     }
-
+    
+    free(reg);
     return 0;
 }
 
