@@ -185,8 +185,16 @@ int dmbg_function_list_free(char **functions, int functions_count);
 int dmbg_get_run_context(DumbuggerState *state, char **filename, int *line_no);
 
 typedef enum DmbgStatus {
+    /* Процесс запущен и выполняется */
     DMBG_STATUS_RUNNING,
+    /* 
+     * Процесс запущен, но остановлен.
+     * Изменение процесса возможно в этом состоянии 
+     */
     DMBG_STATUS_STOPPED,
+    /* 
+     * Процесс завершил работу
+     */
     DMBG_STATUS_FINISHED
 } DmbgStatus;
 

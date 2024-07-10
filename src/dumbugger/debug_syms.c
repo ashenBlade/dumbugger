@@ -160,8 +160,7 @@ static int fill_functions_info_recurse(Dwarf_Die cu_die, Dwarf_Error *err,
 }
 
 /* Проверить что suffix является суффиксом строки str */
-static int is_suffix(const char *str, const char *suffix)
-{
+static int is_suffix(const char *str, const char *suffix) {
     int suffix_len = strlen(suffix);
     int str_len = strlen(str);
 
@@ -183,8 +182,7 @@ static int is_suffix(const char *str, const char *suffix)
     return 0;
 }
 
-static int function_info_contains_address_predicate(void *context, function_info *fi)
-{
+static int function_info_contains_address_predicate(void *context, function_info *fi) {
     Dwarf_Addr address = (Dwarf_Addr) context;
     if (FUNC_INFO_CONTAINS_INSTRUCTION(fi, address))
     {
@@ -273,6 +271,10 @@ static int debug_syms_fill_debug_info(Dwarf_Debug dbg, Dwarf_Error *err,
             return -1;
         }
 
+        /* 
+         * Работаем только с 1-уровневой таблицей (дефолт).
+         * Так проще код писать.
+         */
         if (table_count == 0 || table_count == 2)        
         {
             dwarf_srclines_dealloc_b(line_context);
@@ -538,7 +540,6 @@ int debug_syms_context_info_get(DebugInfo *debug_info, long addr,
                 continue;
             }
 
-            
             if (most_likely_sli->addr < sli->addr && sli->addr <= addr_dwarf)
             {
                 most_likely_sli = sli;

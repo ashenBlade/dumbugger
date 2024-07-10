@@ -129,28 +129,20 @@ static int poke_text(DumbuggerState *state, long addr, long text) {
 }
 
 static int get_load_addr(pid_t pid, const char *exe_name, long *load_addr) {
-    long start, end;
-    long offset;
-    int major, minor;
-    long inode;
-    char filepath[PATH_MAX + 1];
-
-    int res;
-    char maps_path[32];
-    FILE *maps_file;
-
     /*
      * Для нахождения адреса загрузки парсим /proc/id/maps файл.
      * Находим первое упоминание exe_name в этом файле и возвращаем первый его
      * адрес. Обычно, нужный адрес самый первый, но лучше пройдем по всем
      * строкам и найдем нужный.
      */
-    res = snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", (int) pid);
-    if (res == -1) {
+
+    char maps_path[32];
+    if (snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", (int) pid) ==
+        -1) {
         return -1;
     }
 
-    maps_file = fopen(maps_path, "r");
+    FILE *maps_file = fopen(maps_path, "r");
     if (maps_file == NULL) {
         return -1;
     }
@@ -162,6 +154,8 @@ static int get_load_addr(pid_t pid, const char *exe_name, long *load_addr) {
      * Нам нужно получить первый 'start', у которого file_path равен exe_name,
      * т.е. бинарю запускаемого процесса
      */
+    long start;
+    char filepath[PATH_MAX + 1];
     while (fscanf(maps_file, "%lx-%*x %*c%*c%*c%*c %*d %*d:%*d %*d%*c %s",
                   &start, filepath) == 2) {
         if (strcmp(filepath, exe_name) != 0) {
@@ -184,16 +178,14 @@ static int get_load_addr(pid_t pid, const char *exe_name, long *load_addr) {
 }
 
 static int get_exe_path(pid_t pid, char *exe_path, int exe_path_len) {
-    int len;
     char link_path[32];
-
     memset(link_path, 0, sizeof(link_path));
-    len = snprintf(link_path, sizeof(link_path), "/proc/%d/exe", (int) pid);
-    if (len == -1) {
+    if (snprintf(link_path, sizeof(link_path), "/proc/%d/exe", (int) pid) == -1) {
         return -1;
     }
 
-    if ((len = readlink(link_path, exe_path, exe_path_len)) == -1) {
+    int len = readlink(link_path, exe_path, exe_path_len);
+    if (len == -1) {
         return -1;
     }
     exe_path[len + 1] = '\0';
@@ -202,12 +194,10 @@ static int get_exe_path(pid_t pid, char *exe_path, int exe_path_len) {
 }
 
 static int fill_debug_info(DumbuggerState *state, pid_t child_pid) {
-    char exe_path[PATH_MAX];
-    long load_addr;
-
     /*
      * Получаем полный путь до исполняемого файла
      */
+    char exe_path[PATH_MAX];
     if (get_exe_path(child_pid, exe_path, sizeof(exe_path)) == -1) {
         return -1;
     }
@@ -215,6 +205,7 @@ static int fill_debug_info(DumbuggerState *state, pid_t child_pid) {
     /*
      * Находим загрузочный адрес
      */
+    long load_addr;
     switch (get_load_addr(child_pid, exe_path, &load_addr)) {
         case 1:
             errno = EIO;
@@ -309,7 +300,6 @@ DumbuggerState *dmbg_run(const char *prog_name, const char **args) {
 }
 
 int dmbg_stop(DumbuggerState *state) {
-    bool is_running = false;
     switch (state->state) {
         case PROCESS_STATE_FINISHED:
             return 0;
@@ -521,8 +511,7 @@ int dmbg_continue(DumbuggerState *state) {
     return 0;
 }
 
-static int make_single_instruction_step(DumbuggerState *state)
-{
+static int make_single_instruction_step(DumbuggerState *state) {
     if (ptrace(PTRACE_SINGLESTEP, state->pid, NULL, NULL) == -1) {
         return -1;
     }
@@ -699,8 +688,6 @@ typedef struct dumbugger_assembly_dump_buffer {
 } dumbugger_assembly_dump_buffer;
 
 static int fprintf_dumbugger_assembly_dump(void *stream, const char *fmt, ...) {
-    int written;
-    va_list argp;
     dumbugger_assembly_dump_buffer *buf =
         (dumbugger_assembly_dump_buffer *) stream;
 
@@ -709,8 +696,9 @@ static int fprintf_dumbugger_assembly_dump(void *stream, const char *fmt, ...) {
     }
 
     if (buf->asm_str_index < sizeof(buf->dump->insns[buf->insn_index].str)) {
+        va_list argp;
         va_start(argp, fmt);
-        written = snprintf(
+        int written = snprintf(
             &buf->dump->insns[buf->insn_index].str[buf->asm_str_index],
             sizeof(buf->dump->insns[buf->insn_index].str) - buf->asm_str_index,
             fmt, argp);
@@ -728,16 +716,13 @@ static int fprintf_dumbugger_assembly_dump(void *stream, const char *fmt, ...) {
 static int write_cleanup_escape(char *buf, int buf_len, const char *fmt,
                                 va_list argp) {
     /*
-     * libopcodes добавляет в результирующую строку управляющие символы
-     * в формате
-     * \002X\002, где X - любой символ.
+     * libopcodes добавляет в результирующую строку 3 символа
+     * \002X\002, где X - любой символ, \002 - восьмеричные.
      * Это добавляет в вывод лишние символы и мешают. Поэтому удаляем эти
      * последовательности. Как по другому их убрать - не знаю.
      */
 
-    int written;
-
-    written = snprintf(buf, buf_len, fmt, argp);
+    int written = snprintf(buf, buf_len, fmt, argp);
 
     if (written < 0) {
         return -1;
@@ -775,15 +760,8 @@ static int write_cleanup_escape(char *buf, int buf_len, const char *fmt,
 static int fprintf_styled_dumbugger_assembly_dump(void *stream,
                                                   enum disassembler_style style,
                                                   const char *fmt, ...) {
-    int res;
-    int written;
-    int current_length;
-    int left_space;
-    char temp_buf[64];
-    va_list argp;
-    dumbugger_assembly_dump_buffer *buf;
-
-    buf = (dumbugger_assembly_dump_buffer *) stream;
+    dumbugger_assembly_dump_buffer *buf =
+        (dumbugger_assembly_dump_buffer *) stream;
 
     if (buf->in_addr_offset_process_state) {
         if (style == dis_style_register) {
@@ -803,9 +781,11 @@ static int fprintf_styled_dumbugger_assembly_dump(void *stream,
         return -1;
     }
 
+    char temp_buf[64];
     memset(temp_buf, 0, sizeof(temp_buf));
+    va_list argp;
     va_start(argp, fmt);
-    written = write_cleanup_escape(temp_buf, sizeof(temp_buf), fmt, argp);
+    int written = write_cleanup_escape(temp_buf, sizeof(temp_buf), fmt, argp);
     va_end(argp);
 
     if (written == -1) {
@@ -817,8 +797,8 @@ static int fprintf_styled_dumbugger_assembly_dump(void *stream,
         return 0;
     }
 
-    current_length = buf->asm_str_index;
-    left_space = sizeof(buf->dump->insns[buf->insn_index].str) - current_length;
+    int current_length = buf->asm_str_index;
+    int left_space = sizeof(buf->dump->insns[buf->insn_index].str) - current_length;
     if (left_space <= 0) {
         return 0;
     }
@@ -873,9 +853,7 @@ static int read_tracee_memory_func(bfd_vma memaddr, bfd_byte *myaddr,
     return 0;
 }
 
-/*
- * Дизассемблировать length следующих машинных инструкций
- */
+
 int dmbg_disassemble(DumbuggerState *state, int length,
                      DumbuggerAssemblyDump *result) {
     assert(state != NULL);

@@ -31,10 +31,14 @@ static int print_help_cmd(program_state *state, int argc, const char **argv) {
         "help\t\t\t- show this help message\n"
         "regs show\t\t- show registers state\n"
         "regs set REG VALUE\t- set value of register REG to VALUE\n"
-        "list [N]\t\t- show next N assembler instructions, 5 by default\n"
+        "disasm [N]\t\t- show next N assembler instructions, 5 by default\n"
         "functions show\t\t- show functions in process \n"
-        "continue\t\t- continue execution\n");
-    /* TODO: добавить команды сюда */
+        "continue\t\t- continue execution\n"
+        "src\t\t\t- show current source line context\n"
+        "s | step\t\t- make single source line step\n"
+        "si\t\t\t- make single instruction step\n"
+        "bp [LOCATION]\t\t- set breakpoint at specified location\n"
+        "cont | continue\t- continue execution\n");
     return 0;
 }
 
@@ -121,7 +125,8 @@ static int set_reg_cmd(program_state *state, int argc, const char **argv) {
         base = 8;
         start_pos += sizeof("0") - 1;
     }
-
+    
+    errno = 0;
     long value = strtol(start_pos, NULL, base);
     if (errno != 0) {
         printf("error parsing number \"%s\": %s\n", argv[3], strerror(errno));
@@ -405,7 +410,7 @@ static CommandsRegistry *build_commands_registry() {
 
     CMDREG_ADD("help", print_help_cmd);
     CMDREG_ADD("regs", regs_cmd);
-    CMDREG_ADD("list", list_assembler_cmd);
+    CMDREG_ADD("disasm", list_assembler_cmd);
     CMDREG_ADD("stop", stop_running_process_cmd);
     CMDREG_ADD("cont", continue_cmd);
     CMDREG_ADD("continue", continue_cmd);
