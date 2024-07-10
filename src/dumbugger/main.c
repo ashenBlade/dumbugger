@@ -125,7 +125,7 @@ static int set_reg_cmd(program_state *state, int argc, const char **argv) {
         base = 8;
         start_pos += sizeof("0") - 1;
     }
-    
+
     errno = 0;
     long value = strtol(start_pos, NULL, base);
     if (errno != 0) {
@@ -415,6 +415,7 @@ static CommandsRegistry *build_commands_registry() {
     CMDREG_ADD("cont", continue_cmd);
     CMDREG_ADD("continue", continue_cmd);
     CMDREG_ADD("bp", set_breakpoint_cmd);
+    CMDREG_ADD("breakpoint", set_breakpoint_cmd);
     CMDREG_ADD("functions", functions_cmd);
     CMDREG_ADD("si", single_instruction_cmd);
     CMDREG_ADD("src", show_src_lines_cmd);
