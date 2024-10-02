@@ -44,7 +44,7 @@ static int print_help_cmd(program_state *state, int argc, const char **argv) {
 
 static int single_instruction_cmd(program_state *state, int argc,
                                   const char **argv) {
-    if (dmbg_single_step_i(state->dmbg_state) == -1) {
+    if (dmbg_step_instruction(state->dmbg_state) == -1) {
         return -1;
     }
 
@@ -53,15 +53,50 @@ static int single_instruction_cmd(program_state *state, int argc,
 
 static int single_src_line_step_cmd(program_state *state, int argc,
                                     const char **argv) {
-    if (dmbg_single_step_src(state->dmbg_state) == -1) {
-        if (errno == ENOENT) {
-            printf("no source line found for current instruction\n");
+    enum { STEP_IN, STEP_OUT, STEP_OVER } step_type;
+    
+    if (argc == 1) {
+        step_type = STEP_OVER;
+    } else if (argc > 2) {
+        printf("too many arguments. expected: \"in\", \"over\", \"out\"");
+        return 0;
+    } else {
+        if (strncmp(argv[1], "out", sizeof("out") - 1) == 0) {
+            step_type = STEP_OUT;
+        } else if (strncmp(argv[1], "over", sizeof("over") - 1) == 0) {
+            step_type = STEP_OVER;
+        } else if (strncmp(argv[1], "in", sizeof("in") - 1) == 0) {
+            step_type = STEP_IN;
+        } else {
+            printf("unknown step type: %s, expected: \"in\", \"over\", \"out\"",
+                   argv[1]);
             return 0;
         }
-
-        return -1;
     }
-    return 0;
+
+    int ret_code;
+
+    switch (step_type) {
+        case STEP_IN:
+            ret_code = dmbg_step_in(state->dmbg_state);
+            break;
+        case STEP_OUT:
+            ret_code = dmbg_step_out(state->dmbg_state);
+            break;
+        case STEP_OVER:
+            ret_code = dmbg_step_over(state->dmbg_state);
+            break;
+        default:
+            ret_code = -1;
+            assert(false);
+    }
+
+    if (ret_code == -1 && errno == ENOENT) {
+        printf("no source line found for current instruction\n");
+        return 0;
+    }
+
+    return ret_code;
 }
 
 static int show_regs_cmd(program_state *state, int argc, const char **argv) {
@@ -345,8 +380,7 @@ static int show_src_lines_cmd(program_state *state, int argc,
                               const char **argv) {
     char *line_buf;
     int target_line_no;
-    if (dmbg_get_run_context(state->dmbg_state, &line_buf, &target_line_no) ==
-        -1) {
+    if (dmbg_get_src_position(state->dmbg_state, &line_buf, &target_line_no) == -1) {
         if (errno == ENOENT) {
             printf("no source file found for current instruction\n");
             return 0;
@@ -538,6 +572,9 @@ int main(int argc, const char **argv) {
     while (true) {
         fflush(stdout);
         if (dmbg_wait(dmbg) == -1) {
+            if (errno == 0) {
+                break;
+            }
             perror("dmbg_wait");
             return 1;
         }
@@ -572,6 +609,9 @@ int main(int argc, const char **argv) {
     }
 
     if (dmbg_stop(dmbg) == -1) {
+        if (errno == 0) {
+            return 0;
+        }
         perror("dmbg_stop");
         return 1;
     }

@@ -6,24 +6,21 @@
 #include "commands.h"
 #include "list.h"
 
-typedef struct command
-{
+typedef struct command {
     command_func func;
     const char *name;
 } command;
 
 LIST_DEFINE(command, cmd_list)
+LIST_DECLARE(command, cmd_list)
 
-struct CommandsRegistry
-{
-    cmd_list list;
+struct CommandsRegistry {
+    cmd_list *list;
 };
 
-CommandsRegistry *cmdreg_new()
-{
+CommandsRegistry *cmdreg_new() {
     CommandsRegistry *reg = malloc(sizeof(CommandsRegistry));
-    if (reg == NULL)
-    {
+    if (reg == NULL) {
         return NULL;
     }
     memset(reg, 0, sizeof(CommandsRegistry));
@@ -31,26 +28,21 @@ CommandsRegistry *cmdreg_new()
     return reg;
 }
 
-int cmdreg_free(CommandsRegistry *reg)
-{
-    if (reg == NULL)
-    {
+int cmdreg_free(CommandsRegistry *reg) {
+    if (reg == NULL) {
         return 0;
     }
 
-    if (cmd_list_free(&reg->list) == -1)
-    {
+    if (cmd_list_free(reg->list) == -1) {
         return -1;
     }
-    
+
     free(reg);
     return 0;
 }
 
-int cmdreg_add(CommandsRegistry *reg, const char *name, command_func func)
-{
-    if (reg == NULL || name == NULL || func == NULL)
-    {
+int cmdreg_add(CommandsRegistry *reg, const char *name, command_func func) {
+    if (reg == NULL || name == NULL || func == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -60,32 +52,26 @@ int cmdreg_add(CommandsRegistry *reg, const char *name, command_func func)
         .name = name,
     };
 
-    if (cmd_list_add(&reg->list, &cmd) == -1)
-    {
+    if (cmd_list_add(reg->list, &cmd) == -1) {
         return -1;
     }
 
     return 0;
 }
 
-command_func cmdreg_find(CommandsRegistry *reg, const char *name)
-{
-    if (reg == NULL || name == NULL)
-    {
+command_func cmdreg_find(CommandsRegistry *reg, const char *name) {
+    if (reg == NULL || name == NULL) {
         errno = EINVAL;
         return NULL;
     }
 
-    if (list_size(&reg->list) == 0)
-    {
+    if (list_size(reg->list) == 0) {
         return NULL;
     }
 
     command *cmd;
-    foreach (cmd, &reg->list)
-    {
-        if (strcasecmp(name, cmd->name) == 0)
-        {
+    foreach (cmd, reg->list) {
+        if (strcasecmp(name, cmd->name) == 0) {
             return cmd->func;
         }
     }

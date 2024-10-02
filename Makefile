@@ -1,14 +1,14 @@
+.PHONY: all
+all: libdwarf libopcodes dumbugger
+
 .PHONY: libdwarf
 libdwarf:
-	make -C src/libdwarf all
+	make -C lib/libdwarf all
 
 .PHONY: libopcodes
 libopcodes:
-	make -C src/libopcodes all
+	make -C lib/libopcodes all
 
 .PHONY: dumbugger
 dumbugger:
-	make -C src/dumbugger all
-
-.PHONY: all
-all: libdwarf libopcodes dumbugger
+	make -C src all

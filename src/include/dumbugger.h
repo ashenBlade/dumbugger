@@ -66,12 +66,24 @@ int dmbg_continue(DumbuggerState *state);
 /*
  * Выполнить одну инструкцию и остановиться.
  */
-int dmbg_single_step_i(DumbuggerState *state);
+int dmbg_step_instruction(DumbuggerState *state);
 
-/* 
+/*
  * Выполнить одну строку исходного кода (step in)
  */
-int dmbg_single_step_src(DumbuggerState *state);
+int dmbg_step_in(DumbuggerState *state);
+
+/*
+ * Выполнить одну строку исходного кода в текущей функции,
+ * без входа внутрь других функций (step over)
+ */
+int dmbg_step_over(DumbuggerState *state);
+
+/*
+ * Поставить точку останова таким образом, чтобы остановиться тогда,
+ * когда произойдет возврат из текущей
+ */
+int dmbg_step_out(DumbuggerState *state);
 
 /* Структура, представляющая регистры процессора */
 typedef struct Registers {
@@ -150,10 +162,10 @@ int dmbg_set_breakpoint_addr(DumbuggerState *state, long addr);
  */
 int dmbg_set_breakpoint_function(DumbuggerState *state, const char *function);
 
-/* 
+/*
  * Поставить точку останова в файле на строке.
  * Нумерация строк с 1.
- * 
+ *
  * Если по указанной строке нельзя поставить точку останова (функции нет),
  * то возвращается -1 и errno равен ENOENT
  */
@@ -178,27 +190,26 @@ int dmbg_functions_get(DumbuggerState *state, char ***functions,
  */
 int dmbg_function_list_free(char **functions, int functions_count);
 
-
-/* 
+/*
  * Получить информацию об исходном коде, исполняющего процесса
  */
-int dmbg_get_run_context(DumbuggerState *state, char **filename, int *line_no);
+int dmbg_get_src_position(DumbuggerState *state, char **filename, int *line_no);
 
 typedef enum DmbgStatus {
     /* Процесс запущен и выполняется */
     DMBG_STATUS_RUNNING,
-    /* 
+    /*
      * Процесс запущен, но остановлен.
-     * Изменение процесса возможно в этом состоянии 
+     * Изменение процесса возможно в этом состоянии
      */
     DMBG_STATUS_STOPPED,
-    /* 
+    /*
      * Процесс завершил работу
      */
     DMBG_STATUS_FINISHED
 } DmbgStatus;
 
-/* 
+/*
  * Получить текущий статус отслеживаемого процесса
  */
 DmbgStatus dmbg_status(DumbuggerState *state);

@@ -13,15 +13,19 @@
 #include <sys/ptrace.h>
 #include <sys/user.h>
 #include <sys/wait.h>
+#include <sys/reg.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <signal.h>
 
+#include "list.h"
 #include "debug_syms.h"
 #include "dis-asm.h"
-#include "list.h"
 
 #define WIFBREAKPOINT(wstatus) \
     (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGTRAP)
+
+#define MAKE_BREAKPOINT_TEXT(text) (((text) & ~0xFF) | 0xCC)
 
 #define STOPPED_PROCESS_GUARD(state)              \
     if (state->state == PROCESS_STATE_RUNNING) {  \
@@ -51,6 +55,7 @@ typedef struct breakpoint_info {
 } breakpoint_info;
 
 LIST_DEFINE(breakpoint_info, bp_list)
+LIST_DECLARE(breakpoint_info, bp_list)
 
 struct DumbuggerState {
     /*
@@ -90,6 +95,9 @@ struct DumbuggerState {
     DebugInfo *debug_info;
 };
 
+static int set_breakpoint_at_addr(DumbuggerState *state, long addr);
+static int remove_breakpoint(DumbuggerState *state, long addr);
+
 static void run_child(const char **args) {
     if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) == -1) {
         exit(errno);
@@ -100,13 +108,31 @@ static void run_child(const char **args) {
 }
 
 static int get_rip(DumbuggerState *state, long *rip) {
-    long value =
-        ptrace(PTRACE_PEEKUSER, state->pid, sizeof(long) * REG_RIP, NULL);
-    if (value == -1 && errno != 0) {
+    struct user_regs_struct regs;
+    if (ptrace(PTRACE_GETREGS, state->pid, NULL, &regs) == -1) {
         return -1;
     }
 
-    *rip = value;
+    *rip = (long) regs.rip;
+    return 0;
+
+    // long result =
+    //     ptrace(PTRACE_PEEKUSER, state->pid, sizeof(long) * REG_RIP, NULL);
+    // if (result == -1 && errno != 0) {
+    //     return -1;
+    // }
+
+    // *rip = result;
+    // return 0;
+}
+
+static int get_rbp(DumbuggerState *state, long *rbp) {
+    struct user_regs_struct regs;
+    if (ptrace(PTRACE_GETREGS, state->pid, NULL, &regs) == -1) {
+        return -1;
+    }
+
+    *rbp = (long) regs.rbp;
     return 0;
 }
 
@@ -147,10 +173,10 @@ static int get_load_addr(pid_t pid, const char *exe_name, long *load_addr) {
         return -1;
     }
 
-    /* 
+    /*
      * Формат файла:
      * start-end    flags   offset  major_id:minor_id   inode_id    file_path
-     * 
+     *
      * Нам нужно получить первый 'start', у которого file_path равен exe_name,
      * т.е. бинарю запускаемого процесса
      */
@@ -180,7 +206,8 @@ static int get_load_addr(pid_t pid, const char *exe_name, long *load_addr) {
 static int get_exe_path(pid_t pid, char *exe_path, int exe_path_len) {
     char link_path[32];
     memset(link_path, 0, sizeof(link_path));
-    if (snprintf(link_path, sizeof(link_path), "/proc/%d/exe", (int) pid) == -1) {
+    if (snprintf(link_path, sizeof(link_path), "/proc/%d/exe", (int) pid) ==
+        -1) {
         return -1;
     }
 
@@ -377,33 +404,14 @@ static int restore_after_breakpoint(DumbuggerState *state) {
     if (get_rip(state, &rip) == -1) {
         return -1;
     }
-    --rip;
 
-    breakpoint_info *info;
-    if (!bp_list_contains(&state->breakpoints,
-                          breakpoint_equals_address_predicate, (void *) rip,
-                          &info)) {
-        printf("not exists\n");
-        return 0;
-    }
-
-    assert(info->address == rip);
+    /* Откатываемся */
+    rip -= 1;
     if (set_rip(state, rip) == -1) {
         return -1;
     }
 
-    long data;
-    if (peek_text(state, rip, &data) == -1) {
-        return -1;
-    }
-
-    if ((data & ((long) 0xFF)) != ((long) 0xCC)) {
-        printf("not equal\n");
-    }
-
-    data = (data & ((long) ~0xFF)) | (info->saved_text & ((long) 0xFF));
-
-    if (poke_text(state, rip, data) == -1) {
+    if (remove_breakpoint(state, rip) == -1) {
         return -1;
     }
 
@@ -537,10 +545,9 @@ static int make_single_instruction_step(DumbuggerState *state) {
     return 0;
 }
 
-int dmbg_single_step_i(DumbuggerState *state) {
+int dmbg_step_instruction(DumbuggerState *state) {
     STOPPED_PROCESS_GUARD(state);
-    switch (make_single_instruction_step(state))
-    {
+    switch (make_single_instruction_step(state)) {
         case 1:
         case 0:
             return 0;
@@ -549,59 +556,302 @@ int dmbg_single_step_i(DumbuggerState *state) {
     }
 }
 
-int dmbg_single_step_src(DumbuggerState *state) {
+int dmbg_step_in(DumbuggerState *state) {
+    /*
+     * Реализация step in:
+     *
+     * 1. Получаем границы текущей строки
+     * 2. Выполняем инструкции поочередно
+     * 3. Если текущая инструкция на старой строке, то п. 2
+     */
     STOPPED_PROCESS_GUARD(state);
 
     long rip;
-    if (get_rip(state, &rip) == -1)
-    {
+    if (get_rip(state, &rip) == -1) {
         return -1;
     }
 
-    ContextInfo prev_ci;
-    if (debug_syms_context_info_get(state->debug_info, rip - state->load_addr, &prev_ci) == -1)
-    {
-        errno = ENOENT;
+    /* Находим текущую строку кода и ее функцию */
+    SourceLineInfo *start_sli = NULL;
+    FunctionInfo *start_finfo = NULL;
+    if (debug_syms_get_context(state->debug_info, rip, &start_finfo,
+                               &start_sli) == -1) {
+        /* ENOENT обработается выше */
         return -1;
     }
+    assert(start_sli != NULL && start_finfo != NULL);
 
-    /* Выполняем по 1 инструкции до тех пор, пока информация о контексте не поменяется */
-    while (true)
-    {
-        switch (make_single_instruction_step(state))
-        {
-            case 1:
-                debug_syms_context_info_free(&prev_ci);
-                return 0;
+    /* Выполняем по 1 инструкции до тех пор, пока информация о контексте не
+     * поменяется */
+    while (true) {
+        switch (make_single_instruction_step(state)) {
             case -1:
-                debug_syms_context_info_free(&prev_ci);
                 return -1;
+            case 1:
+                return 0;
         }
 
-        if (get_rip(state, &rip) == -1)
-        {
-            debug_syms_context_info_free(&prev_ci);
+        if (get_rip(state, &rip) == -1) {
             return -1;
         }
 
-        ContextInfo cur_ci;
-        if (debug_syms_context_info_get(state->debug_info, rip - state->load_addr, &cur_ci) == -1) {
-            debug_syms_context_info_free(&prev_ci);
-            errno = ENOENT;
+        FunctionInfo *cur_fi = NULL;
+        SourceLineInfo *cur_sli = NULL;
+        if (debug_syms_get_context(state->debug_info, rip, &cur_fi, &cur_sli) ==
+            -1) {
+            if (errno == ENOENT) {
+                return 0;
+            }
             return -1;
-        } 
-        
-        /* Может случиться так, что вызываем функцию из другого файла, но номера строк одинаковые будут */
-        if (cur_ci.src_line != prev_ci.src_line || strcmp(cur_ci.src_filename, prev_ci.src_filename) != 0)
-        {
-            debug_syms_context_info_free(&prev_ci);
-            debug_syms_context_info_free(&cur_ci);
+        }
+
+        /* Может случиться так, что вызываем функцию из другого файла, но номера
+         * строк одинаковые будут */
+        if (start_sli->logical_line_no != cur_sli->logical_line_no ||
+            strcmp(start_finfo->decl_filename, cur_fi->decl_filename) != 0) {
             return 0;
         }
-
-        debug_syms_context_info_free(&prev_ci);
-        memcpy(&prev_ci, &cur_ci, sizeof(ContextInfo));
     };
+}
+
+int dmbg_step_out(DumbuggerState *state) {
+    /*
+     * step out реализуется следующим образом:
+     *
+     * 1. Читаем значение RBP
+     * 2. Получаем с его помощью адрес возврата
+     * 3. Ставим туда точку останова
+     * 4. Удаляем точку останова, если останов произошел не в ней
+     *
+     * Последний шаг нужен тогда, когда на пути выполнения была
+     * другая точка останова - тогда поставленная на 3 шаге уже не нужна.
+     */
+
+    STOPPED_PROCESS_GUARD(state);
+
+    /*
+     * |-------------| <----- RBP + 16
+     * | return addr |
+     * |-------------| <----- RBP + 8
+     * |  prev rbp   |
+     * |-------------| <----- RBP
+     * |    .....    |
+     */
+    long rbp;
+    if (get_rbp(state, &rbp) == -1) {
+        return -1;
+    }
+
+    long return_addr;
+    if (peek_text(state, rbp + 0x8, &return_addr) == -1) {
+        return -1;
+    }
+
+    if (set_breakpoint_at_addr(state, return_addr) == -1) {
+        return -1;
+    }
+
+    if (dmbg_continue(state) == -1) {
+        return -1;
+    }
+
+    if (dmbg_wait(state) == -1) {
+        return -1;
+    }
+
+    if (state->state == PROCESS_STATE_FINISHED) {
+        return 0;
+    }
+
+    /*
+     * Не факт, что точка останова та, что поставили - это может быть
+     * точкой, что просто лежала по пути. Поэтому вручную удалим ту,
+     * что поставили
+     */
+    if (remove_breakpoint(state, return_addr) == -1) {
+        return -1;
+    }
+
+    long rip;
+    if (get_rip(state, &rip) == -1) {
+        return -1;
+    }
+
+    FunctionInfo *cur_function;
+    if (debug_syms_get_function_at_addr(state->debug_info, rip,
+                                        &cur_function) == 0) {
+        /* Функции исходного кода нет */
+        return 0;
+    }
+
+    /* 
+     * Когда вернулись нам необходимо завершить выполнение строки,
+     * на которую вошли - необходимо восстановить контекст (регистры),
+     * иначе они будут равны контексту старой функции.
+     * Для этого просто выполним все инструкции до следующей строки.
+     */
+
+    SourceLineInfo *cur_line = NULL;
+    SourceLineInfo *next_line = NULL;
+    SourceLineInfo *sl_info;
+    foreach (sl_info, cur_function->line_table) {
+        if (cur_line == NULL) {
+            if (sl_info->addr <= rip) {
+                cur_line = sl_info;
+            }
+        } else {
+            next_line = sl_info;
+            break;
+        }
+    }
+
+    if (cur_line == NULL) {
+        /* Не нашли соответствующую строку */
+        return 0;
+    }
+
+    /* 
+     * Возможно, следующей строки нет, т.к. текущая была последней.
+     * В этом случае, используем последний адрес функции (high_pc) как конец
+     * последней инструкции
+     */
+    long line_end_addr;
+    if (next_line == NULL) {
+        line_end_addr = cur_function->high_pc;
+    } else {
+        line_end_addr = next_line->addr;
+    }
+
+    do {
+        switch (make_single_instruction_step(state)) {
+            case -1:
+                return -1;
+            case 1:
+                return 0;
+            default:
+                break;
+        }
+
+        if (get_rip(state, &rip) == -1) {
+            return -1;
+        }
+    } while (cur_line->addr <= rip && rip <= line_end_addr);
+
+    return 0;
+}
+
+int dmbg_step_over(DumbuggerState *state) {
+    long rip;
+    if (get_rip(state, &rip) == -1) {
+        return -1;
+    }
+
+    FunctionInfo *cur_func;
+    switch (
+        debug_syms_get_function_at_addr(state->debug_info, rip, &cur_func)) {
+        case -1:
+            return -1;
+        case 0:
+            errno = ENOENT;
+            return -1;
+        default:
+            break;
+    }
+
+    assert(cur_func != NULL);
+
+    /*
+     * Мы не знаем куда точно попадем, так как есть условия, goto и др.,
+     * поэтому поставим точки останова на все строки до конца функции
+     */
+    bp_list *set_breakpoints;
+    if (bp_list_init(&set_breakpoints) == -1) {
+        return -1;
+    }
+
+    SourceLineInfo *line;
+    foreach (line, cur_func->line_table) {
+        /* Пропускаем только текущую строку, так как мы можем уйти выше.
+         * Например, goto, longjmp, циклы и т.д.
+         */
+        if (line->addr == rip) {
+            continue;
+        }
+
+        breakpoint_info cur_bp = {
+            .address = line->addr,
+            .saved_text = 0,
+        };
+
+        if (bp_list_add(set_breakpoints, &cur_bp) == -1) {
+            return -1;
+        }
+    }
+
+    /*
+     * Может возникнуть 2 ситуации (есть или нет след. строки):
+     *
+     * - Если есть, то ставим точку останова на след. строке
+     *
+     * - Если ее нет, то скорее всего мы в конце текущей функции. Значит просто
+     *   выполняем инструкции, пока не выйдем из этой функции.
+     */
+
+    if (list_size(set_breakpoints) > 0) {
+        /*
+         * Если след. строка есть, то ставим точку останова на нее (начало)
+         * и продолжаем выполнение
+         */
+        breakpoint_info *bp;
+        foreach (bp, set_breakpoints) {
+            if (set_breakpoint_at_addr(state, bp->address) == -1) {
+                return -1;
+            }
+        }
+
+        if (dmbg_continue(state) == -1) {
+            return -1;
+        }
+
+        if (dmbg_wait(state) == -1) {
+            return -1;
+        }
+
+        foreach (bp, set_breakpoints) {
+            if (remove_breakpoint(state, bp->address) == -1) {
+                return -1;
+            }
+        }
+
+    } else {
+        /*
+         * Так как следующей строки нет, то доходим до конца текущей функции
+         */
+        do {
+            switch (make_single_instruction_step(state)) {
+                case -1:
+                    return -1;
+                case 1:
+                    /* Закончили выполнение */
+                    return 0;
+                case 0:
+                    break;
+                default:
+                    assert(false &&
+                           "make_single_instruction_step unknown return value");
+                    return -1;
+            }
+
+            if (get_rip(state, &rip) == -1) {
+                return -1;
+            }
+        } while (cur_func->low_pc <= rip && rip <= cur_func->high_pc);
+    }
+
+    if (bp_list_free(set_breakpoints) == -1) {
+        return -1;
+    }
+    return 0;
 }
 
 int dmbg_get_regs(DumbuggerState *state, Registers *regs) {
@@ -798,7 +1048,8 @@ static int fprintf_styled_dumbugger_assembly_dump(void *stream,
     }
 
     int current_length = buf->asm_str_index;
-    int left_space = sizeof(buf->dump->insns[buf->insn_index].str) - current_length;
+    int left_space =
+        sizeof(buf->dump->insns[buf->insn_index].str) - current_length;
     if (left_space <= 0) {
         return 0;
     }
@@ -852,7 +1103,6 @@ static int read_tracee_memory_func(bfd_vma memaddr, bfd_byte *myaddr,
 
     return 0;
 }
-
 
 int dmbg_disassemble(DumbuggerState *state, int length,
                      DumbuggerAssemblyDump *result) {
@@ -934,8 +1184,20 @@ int dumb_assembly_dump_free(DumbuggerAssemblyDump *dump) {
     return 0;
 }
 
+static int has_breakpoint_at_address_predicate(void *ctx,
+                                               breakpoint_info *info) {
+    return info->address == (long) ctx ? 1 : 0;
+}
+
 static int dumbugger_state_add_breakpoint(DumbuggerState *state,
                                           breakpoint_info *info) {
+    breakpoint_info *dummy;
+    if (bp_list_contains(&state->breakpoints,
+                         has_breakpoint_at_address_predicate,
+                         (void *) info->address, &dummy)) {
+        return 0;
+    }
+
     return bp_list_add(&state->breakpoints, info);
 }
 
@@ -978,15 +1240,19 @@ int dmbg_set_breakpoint_function(DumbuggerState *state, const char *function) {
         return -1;
     }
 
-    long func_addr;
-    if (debug_syms_get_function_addr(state->debug_info, function, &func_addr) ==
-        1) {
+    FunctionInfo *func;
+    int res =
+        debug_syms_get_function_by_name(state->debug_info, function, &func);
+    if (res == -1) {
+        return -1;
+    }
+
+    if (res == 0) {
         errno = ENOENT;
         return -1;
     }
 
-    long runtime_addr = state->load_addr + func_addr;
-    return set_breakpoint_at_addr(state, runtime_addr);
+    return set_breakpoint_at_addr(state, func->prologue_end_addr);
 }
 
 int dmbg_set_breakpoint_src_file(DumbuggerState *state, const char *filename,
@@ -1014,28 +1280,52 @@ int dmbg_set_breakpoint_src_file(DumbuggerState *state, const char *filename,
     }
 }
 
-static int dumbugger_state_remove_breakpoint(DumbuggerState *state, long addr) {
+static int remove_breakpoint(DumbuggerState *state, long addr) {
     if (list_size(&state->breakpoints) == 0) {
         return 0;
     }
 
-    breakpoint_info *info;
+    breakpoint_info *info = NULL;
     int index = 0;
     foreach (info, &state->breakpoints) {
         if (info->address == addr) {
-            if (bp_list_remove(&state->breakpoints, index) == -1) {
-                return -1;
-            }
-            return 1;
+            break;
         }
         ++index;
+    }
+
+    if (list_size(&state->breakpoints) <= index) {
+        /* Нет такой точки останова */
+        return 0;
+    }
+
+    if (info == NULL) {
+        /* Точка останова не найдена */
+        return 0;
+    }
+
+    /*
+     * Перед тем как удалить точку останова из списка, восстановим данные
+     */
+    long current_text;
+    if (peek_text(state, addr, &current_text) == -1) {
+        return -1;
+    }
+
+    current_text = (current_text & ~0xFF) | (info->saved_text & 0xFF);
+    if (poke_text(state, addr, current_text) == -1) {
+        return -1;
+    }
+
+    if (bp_list_remove(&state->breakpoints, index) == -1) {
+        return -1;
     }
 
     return 0;
 }
 
 int dmbg_remove_breakpoint(DumbuggerState *state, long addr) {
-    int result = dumbugger_state_remove_breakpoint(state, addr);
+    int result = remove_breakpoint(state, addr);
     if (result == 0) {
         errno = EINVAL;
         return -1;
@@ -1050,8 +1340,32 @@ int dmbg_remove_breakpoint(DumbuggerState *state, long addr) {
 
 int dmbg_functions_get(DumbuggerState *state, char ***functions,
                        int *functions_count) {
-    return debug_syms_get_all_function(state->debug_info, functions,
-                                       functions_count);
+    int count = list_size(state->debug_info->functions);
+    if (count == 0) {
+        return 0;
+    }
+
+    char **funcs = malloc(count * sizeof(char *));
+    if (funcs == NULL) {
+        return -1;
+    }
+
+    int i = 0;
+    FunctionInfo *finfo;
+    foreach (finfo, state->debug_info->functions) {
+        funcs[i] = strdup(finfo->name);
+        if (funcs[i] == NULL) {
+            for (int j = 0; j < i; ++j) {
+                free(funcs[j]);
+            }
+            free(funcs);
+            return -1;
+        }
+        ++i;
+    }
+    *functions = funcs;
+    *functions_count = count;
+    return 0;
 }
 
 int dmbg_function_list_free(char **functions, int functions_count) {
@@ -1063,33 +1377,28 @@ int dmbg_function_list_free(char **functions, int functions_count) {
     return 0;
 }
 
-int dmbg_get_run_context(DumbuggerState *state, char **filename, int *line_no) {
+int dmbg_get_src_position(DumbuggerState *state, char **filename,
+                          int *line_no) {
     STOPPED_PROCESS_GUARD(state);
+
     long rip;
     if (get_rip(state, &rip) == -1) {
         return -1;
     }
 
-    ContextInfo run_context;
-    if (debug_syms_context_info_get(state->debug_info, rip - state->load_addr, &run_context) == -1) {
-        errno = ENOENT;
+    FunctionInfo *fi;
+    SourceLineInfo *sli;
+    if (debug_syms_get_context(state->debug_info, rip, &fi, &sli) == -1) {
         return -1;
     }
 
-    *filename = strdup(run_context.src_filename);
-    *line_no = run_context.src_line;
-
-    if (debug_syms_context_info_free(&run_context) == -1) {
-        free(*filename);
-        return -1;
-    }
-
+    *filename = strdup(fi->decl_filename);
+    *line_no = sli->logical_line_no;
     return 0;
 }
 
-DmbgStatus dmbg_status(DumbuggerState *state) { 
-    switch (state->state)
-    {
+DmbgStatus dmbg_status(DumbuggerState *state) {
+    switch (state->state) {
         case PROCESS_STATE_RUNNING:
             return DMBG_STATUS_RUNNING;
         case PROCESS_STATE_STOPPED:
@@ -1097,5 +1406,5 @@ DmbgStatus dmbg_status(DumbuggerState *state) {
         case PROCESS_STATE_FINISHED:
             return DMBG_STATUS_FINISHED;
     }
-    return -1; 
+    return -1;
 }
