@@ -484,28 +484,25 @@ int debug_syms_get_context(DebugInfo *debug_info, long addr,
             continue;
         }
 
-        /*
-         * Для поиска нужной инструкции находим функцию, которая содержит
-         * указанный адрес. После, пробегаемся по всем строкам исходного кода и
-         * ищем подходящую. Мы ищем наиболее подходящую, т.к. адрес может
-         * находиться не в начале строки, а где-то посередине. Поэтому логика
-         * поиска - сужение диапазона возможных строк, находим строку которая
-         * расположена дальше последней лучшей строки, но чтобы ее начало не
-         * превосходило адрес, указанный пользователем.
-         */
-        SourceLineInfo *target_sli = NULL;
-        SourceLineInfo *sli = NULL;
+        SourceLineInfo *prev_sl_info = NULL;
+        SourceLineInfo *sl_info = NULL;
         Dwarf_Addr addr_dwarf = (Dwarf_Addr) addr;
-        foreach (sli, fi->line_table) {
-            if (sli->addr < addr) {
-                continue;
+        foreach (sl_info, fi->line_table) {
+            if (prev_sl_info != NULL) {
+                if (prev_sl_info->addr <= addr && addr < sl_info->addr) {
+                    *out_slinfo = prev_sl_info;
+                    *out_finfo = fi;
+                    return 0;
+                }
             }
 
-            if (sli->addr == addr) {
-                *out_slinfo = sli;
-                *out_finfo = fi;
-                return 0;
-            }
+            prev_sl_info = sl_info;
+        }
+
+        if (prev_sl_info != NULL && prev_sl_info->addr <= addr) {
+            *out_slinfo = prev_sl_info;
+            *out_finfo = fi;
+            return 0;
         }
 
         break;
@@ -513,6 +510,43 @@ int debug_syms_get_context(DebugInfo *debug_info, long addr,
 
     errno = ENOENT;
     return -1;
+}
+
+int debug_syms_get_line_bounds(DebugInfo *state, long addr, long *out_start,
+                    long *out_end) {
+    FunctionInfo *cur_function;
+    if (debug_syms_get_function_at_addr(state, addr, &cur_function) == -1) {
+        return -1;
+    }
+
+    SourceLineInfo *prev_line = NULL;
+    SourceLineInfo *sl_info;
+    foreach (sl_info, cur_function->line_table) {
+        if (prev_line != NULL)
+        {
+            if (prev_line->addr <= addr && addr < sl_info->addr) {
+                *out_start = prev_line->addr;
+                *out_end = sl_info->addr;
+                return 0;
+            }
+        }
+
+        prev_line = sl_info;
+    }
+
+    if (prev_line == NULL) {
+        /* Не нашли соответствующую строку */
+        errno = ENOENT;
+        return -1;
+    }
+
+    /* 
+     * В случае, если это была последняя строка, то
+     * считаем, что ее конец - это конец функции
+     */
+    *out_start = prev_line->addr;
+    *out_end = cur_function->high_pc;
+    return 0;
 }
 
 int debug_syms_free(DebugInfo *debug_info) {

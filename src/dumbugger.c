@@ -572,18 +572,15 @@ int dmbg_step_in(DumbuggerState *state) {
     }
 
     /* Находим текущую строку кода и ее функцию */
-    SourceLineInfo *start_sli = NULL;
-    FunctionInfo *start_finfo = NULL;
-    if (debug_syms_get_context(state->debug_info, rip, &start_finfo,
-                               &start_sli) == -1) {
-        /* ENOENT обработается выше */
+    long start;
+    long end;
+    if (debug_syms_get_line_bounds(state->debug_info, rip, &start, &end) == -1) {
         return -1;
     }
-    assert(start_sli != NULL && start_finfo != NULL);
 
     /* Выполняем по 1 инструкции до тех пор, пока информация о контексте не
      * поменяется */
-    while (true) {
+    do {
         switch (make_single_instruction_step(state)) {
             case -1:
                 return -1;
@@ -595,23 +592,9 @@ int dmbg_step_in(DumbuggerState *state) {
             return -1;
         }
 
-        FunctionInfo *cur_fi = NULL;
-        SourceLineInfo *cur_sli = NULL;
-        if (debug_syms_get_context(state->debug_info, rip, &cur_fi, &cur_sli) ==
-            -1) {
-            if (errno == ENOENT) {
-                return 0;
-            }
-            return -1;
-        }
+    } while (start <= rip && rip <= end);
 
-        /* Может случиться так, что вызываем функцию из другого файла, но номера
-         * строк одинаковые будут */
-        if (start_sli->logical_line_no != cur_sli->logical_line_no ||
-            strcmp(start_finfo->decl_filename, cur_fi->decl_filename) != 0) {
-            return 0;
-        }
-    };
+    return 0;
 }
 
 int dmbg_step_out(DumbuggerState *state) {

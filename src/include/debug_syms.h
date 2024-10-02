@@ -52,6 +52,8 @@ int debug_syms_get_function_at_addr(DebugInfo *debug_info, long addr,
                                     FunctionInfo **function);
 int debug_syms_get_address_at_line(DebugInfo *debug_info, const char *filename,
                                    int line_no, long *addr);
+int debug_syms_get_line_bounds(DebugInfo *state, long addr, long *out_start,
+                               long *out_end);
 int debug_syms_get_context(DebugInfo *debug_info, long addr,
                            FunctionInfo **out_finfo,
                            SourceLineInfo **out_slinfo);
