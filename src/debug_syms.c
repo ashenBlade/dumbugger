@@ -175,19 +175,6 @@ static int function_info_contains_address_predicate(void *context,
     return 0;
 }
 
-static void finalize_functions(FunctionInfoList *funcs) {
-    FunctionInfo *finfo;
-    foreach (finfo, funcs) {
-        if (finfo->prologue_end_addr == 0) {
-            finfo->prologue_end_addr = finfo->low_pc;
-        }
-
-        if (finfo->epilogue_start_addr == 0) {
-            finfo->epilogue_start_addr = finfo->high_pc;
-        }
-    }
-}
-
 static int debug_syms_fill_line_table(Dwarf_Debug dbg, Dwarf_Error *err,
                                       DebugInfo *info) {
     int res;
@@ -285,6 +272,9 @@ static int debug_syms_fill_line_table(Dwarf_Debug dbg, Dwarf_Error *err,
          */
         FunctionInfo *cached_fi = NULL;
 
+        /* Храним */
+        SourceLineInfo *prev_sl_info = NULL;
+
         Dwarf_Line *lines;
         Dwarf_Signed lines_count;
 
@@ -304,6 +294,19 @@ static int debug_syms_fill_line_table(Dwarf_Debug dbg, Dwarf_Error *err,
             Dwarf_Bool epilogue_begin;
             Dwarf_Unsigned isa;
             Dwarf_Unsigned discriminator;
+            Dwarf_Bool is_statement;
+
+            /* 
+             * Обрабатываем только стейтменты - остальные записи 
+             * могут быть простыми инструкциями внутри стейтмента
+             */
+            if (dwarf_linebeginstatement(line, &is_statement, err) != DW_DLV_OK) {
+                return -1;
+            }
+
+            if (!is_statement) {
+                continue;
+            }
 
             /* Имя файла с исходным кодом */
             if (dwarf_linesrc(line, &src_filename, err) != DW_DLV_OK) {
@@ -355,8 +358,6 @@ static int debug_syms_fill_line_table(Dwarf_Debug dbg, Dwarf_Error *err,
             SourceLineInfo sli = {
                 .addr = line_addr,
                 .logical_line_no = line_no,
-                .is_epilogue = (bool) epilogue_begin,
-                .is_prologue = (bool) prologue_end,
             };
 
             if (cur_line_fi->decl_filename == NULL) {
@@ -373,15 +374,7 @@ static int debug_syms_fill_line_table(Dwarf_Debug dbg, Dwarf_Error *err,
             if (SourceLineList_add(cur_line_fi->line_table, &sli) == -1) {
                 return -1;
             }
-
-            if (sli.is_epilogue) {
-                cur_line_fi->epilogue_start_addr = sli.addr;
-            } else if (sli.is_prologue) {
-                cur_line_fi->prologue_end_addr = sli.addr;
-            }
         }
-
-        finalize_functions(info->functions);
 
         dwarf_srclines_dealloc_b(line_context);
         dwarf_dealloc_die(cu_die);

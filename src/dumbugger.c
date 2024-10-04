@@ -25,6 +25,13 @@
 #define WIFBREAKPOINT(wstatus) \
     (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGTRAP)
 
+/* 
+ * Прочитанная инструкция - начало фрейма с 2 инструкциями настройки стека:
+ * push %rbp
+ * mov  %rsp, %rbp
+ */
+#define IS_FRAMESETUP(text) (((text) & 0xFFFFFFFF) == 0xe5894855)
+
 #define MAKE_BREAKPOINT_TEXT(text) (((text) & ~0xFF) | 0xCC)
 
 #define STOPPED_PROCESS_GUARD(state)              \
@@ -97,6 +104,8 @@ struct DumbuggerState {
 
 static int set_breakpoint_at_addr(DumbuggerState *state, long addr);
 static int remove_breakpoint(DumbuggerState *state, long addr);
+static int make_single_instruction_step(DumbuggerState *state);
+static int skip_frame_setup(DumbuggerState *state, long rip);
 
 static void run_child(const char **args) {
     if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) == -1) {
@@ -415,7 +424,12 @@ static int restore_after_breakpoint(DumbuggerState *state) {
         return -1;
     }
 
-    return 1;
+    /* Если точка останова на начале функции, то перейдем к концу пролога */
+    if (skip_frame_setup(state, rip) == -1) {
+        return -1;
+    }
+
+    return 0;
 }
 
 /*
@@ -438,7 +452,10 @@ static int handle_child_stopped(DumbuggerState *state) {
     }
 
     if (si.si_code == SI_KERNEL || si.si_code == TRAP_BRKPT) {
-        return restore_after_breakpoint(state);
+        if (restore_after_breakpoint(state) == -1) {
+            return -1;
+        }
+        return 1;
     }
 
     /*
@@ -454,6 +471,70 @@ static int handle_child_stopped(DumbuggerState *state) {
         return 1;
     }
 
+    return 0;
+}
+
+static int skip_frame_setup(DumbuggerState *state, long rip) {
+    /*
+     * Если дальше пролог функции, то выполним его.
+     * Под прологом имеется ввиду 2 инструкции: push %rbp; mov %rsp, %rbp
+     * В прологе могут быть и другие функции, например, для
+     * выделения места под стек, но для их обнаружения
+     * потребуется больше ресурсов.
+     * Этот код вынужденная мера, так как gcc пока не генерирует DW_LNS_set_prologue_end
+     * инструкцию в DWARF
+     */
+    FunctionInfo *cur_func;
+    if (debug_syms_get_function_at_addr(state->debug_info, rip, &cur_func) == -1) {
+        return -1;
+    }
+
+    if (cur_func->low_pc != rip) {
+        return 0;
+    }
+
+    long text;
+    if (peek_text(state, rip, &text) == -1) {
+        return -1;
+    }
+
+    if (IS_FRAMESETUP(text)) {
+        /* Читаем 2 инструкции: push rbp и mov rsp rbp */
+        if (make_single_instruction_step(state) == -1) {
+            return -1;
+        }
+
+        if (make_single_instruction_step(state) == -1) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int make_single_instruction_step(DumbuggerState *state) {
+    if (ptrace(PTRACE_SINGLESTEP, state->pid, NULL, NULL) == -1) {
+        return -1;
+    }
+
+    if (waitpid(state->pid, &state->wstatus, 0) != state->pid) {
+        return -1;
+    }
+
+    if (WIFEXITED(state->wstatus) || WIFSIGNALED(state->wstatus)) {
+        state->state = PROCESS_STATE_FINISHED;
+        return 1;
+    }
+
+    /*
+     * В данном случае не важно - точка останова или трейс.
+     * Мы останавливаемся в любом случае.
+     */
+    if (handle_child_stopped(state) == -1) {
+        return -1;
+    }
+
+    state->state = PROCESS_STATE_STOPPED;
     return 0;
 }
 
@@ -519,32 +600,6 @@ int dmbg_continue(DumbuggerState *state) {
     return 0;
 }
 
-static int make_single_instruction_step(DumbuggerState *state) {
-    if (ptrace(PTRACE_SINGLESTEP, state->pid, NULL, NULL) == -1) {
-        return -1;
-    }
-
-    if (waitpid(state->pid, &state->wstatus, 0) != state->pid) {
-        return -1;
-    }
-
-    if (WIFEXITED(state->wstatus) || WIFSIGNALED(state->wstatus)) {
-        state->state = PROCESS_STATE_FINISHED;
-        return 1;
-    }
-
-    /*
-     * В данном случае не важно - точка останова или трейс.
-     * Мы останавливаемся в любом случае.
-     */
-    if (handle_child_stopped(state) == -1) {
-        return -1;
-    }
-
-    state->state = PROCESS_STATE_STOPPED;
-    return 0;
-}
-
 int dmbg_step_instruction(DumbuggerState *state) {
     STOPPED_PROCESS_GUARD(state);
     switch (make_single_instruction_step(state)) {
@@ -593,6 +648,10 @@ int dmbg_step_in(DumbuggerState *state) {
         }
 
     } while (start <= rip && rip <= end);
+
+    if (skip_frame_setup(state, rip) == -1) {
+        return -1;
+    }
 
     return 0;
 }
@@ -1235,7 +1294,7 @@ int dmbg_set_breakpoint_function(DumbuggerState *state, const char *function) {
         return -1;
     }
 
-    return set_breakpoint_at_addr(state, func->prologue_end_addr);
+    return set_breakpoint_at_addr(state, func->low_pc);
 }
 
 int dmbg_set_breakpoint_src_file(DumbuggerState *state, const char *filename,

@@ -29,10 +29,6 @@ typedef struct FunctionInfo {
     long low_pc;
     /* Нижний адрес функции, конец */
     long high_pc;
-    /* Адрес конца пролога */
-    long prologue_end_addr;
-    /* Адрес начала эпилога */
-    long epilogue_start_addr;
     /* Таблица строк */
     SourceLineList *line_table;
 } FunctionInfo;
