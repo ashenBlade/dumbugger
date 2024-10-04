@@ -1313,7 +1313,7 @@ int dmbg_set_breakpoint_src_file(DumbuggerState *state, const char *filename,
     switch (debug_syms_get_address_at_line(state->debug_info, filename,
                                            src_line_no, &addr)) {
         case 0:
-            return set_breakpoint_at_addr(state, addr + state->load_addr);
+            return set_breakpoint_at_addr(state, addr);
         case 1:
             errno = ENOENT;
             return -1;
