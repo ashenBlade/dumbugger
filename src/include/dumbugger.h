@@ -209,6 +209,27 @@ typedef enum DmbgStatus {
     DMBG_STATUS_FINISHED
 } DmbgStatus;
 
+/* Получить все переменные объявленные в этой функции */
+int dmbg_get_variables(DumbuggerState *state, char **out_variables,
+                       int *out_count);
+
+/* 
+ * Получить значение указанной переменной. Значения сохраняются в поле out_values
+ * размером out_count.
+ * 
+ * 1 элемент out_values - сырое значение переменной. Далее, в зависимости от
+ * типа переменной:
+ * - Примитив - далее ничего нет и out_values[0] - это и есть значение
+ * - Структура - out_values[0] - пустая строка и далее идут пары из 
+ *      - out_values[x] - название поля
+ *      - out_values[x + 1] - значение поля
+ * - Указатель 
+ *      - если указатель на примитивный тип, то дальше ничего нет
+ *      - если указатель на структуру, то дальше идут поля структуры (как указано выше)
+ */
+int dmbg_get_variable_value(DumbuggerState *state, const char *variable,
+                            char **out_values, int *out_count);
+
 /*
  * Получить текущий статус отслеживаемого процесса
  */

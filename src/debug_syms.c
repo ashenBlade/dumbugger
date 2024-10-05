@@ -76,14 +76,157 @@ static int fill_function_info(Dwarf_Die subprog_die, Dwarf_Error *err,
     return 0;
 }
 
-static int fill_functions_info_recurse(Dwarf_Die cu_die, Dwarf_Error *err,
-                                       DebugInfo *di) {
+static int function_info_contains_address_predicate(void *context,
+                                                    FunctionInfo *fi) {
+    Dwarf_Addr address = (Dwarf_Addr) context;
+    if (FUNC_INFO_CONTAINS_INSTRUCTION(fi, address)) {
+        return 1;
+    }
+    return 0;
+}
+
+static int fill_cu_line_table(Dwarf_Die cu_die, Dwarf_Error *err, DebugInfo *di) {
+    /** Заполняем информацию об исходном коде(строки) */
+    Dwarf_Unsigned version;
+    Dwarf_Small table_count;
+    Dwarf_Line_Context line_context;
+
+    if (dwarf_srclines_b(cu_die, &version, &table_count, &line_context, err) !=
+        DW_DLV_OK) {
+        return -1;
+    }
+
+    /*
+     * Работаем только с 1-уровневой таблицей
+     */
+    if (table_count == 0 || table_count == 2) {
+        dwarf_srclines_dealloc_b(line_context);
+        dwarf_dealloc_die(cu_die);
+        return 0;
+    }
+
+    /*
+     * Кэшируем последний function_info, чтобы заново не искать каждый раз.
+     * Т.к. строки идут последовательно и мы скорее всего окажемся в той же
+     * функции
+     */
+    FunctionInfo *cached_fi = NULL;
+
+    SourceLineInfo *prev_sl_info = NULL;
+
+    Dwarf_Line *lines;
+    Dwarf_Signed lines_count;
+
+    int vres = 0;
+
+    if (dwarf_srclines_from_linecontext(line_context, &lines, &lines_count,
+                                        err) != DW_DLV_OK) {
+        return -1;
+    }
+
+    for (int i = 0; i < lines_count; ++i) {
+        Dwarf_Line line = lines[i];
+        char *src_filename;
+        Dwarf_Unsigned line_no;
+        Dwarf_Addr line_addr;
+        Dwarf_Bool prologue_end;
+        Dwarf_Bool epilogue_begin;
+        Dwarf_Unsigned isa;
+        Dwarf_Unsigned discriminator;
+        Dwarf_Bool is_statement;
+
+        /*
+         * Обрабатываем только стейтменты - остальные записи
+         * могут быть простыми инструкциями внутри стейтмента
+         */
+        if (dwarf_linebeginstatement(line, &is_statement, err) != DW_DLV_OK) {
+            return -1;
+        }
+
+        if (!is_statement) {
+            continue;
+        }
+
+        /* Имя файла с исходным кодом */
+        if (dwarf_linesrc(line, &src_filename, err) != DW_DLV_OK) {
+            return -1;
+        }
+
+        /* Номер строки в файле */
+        if (dwarf_linelogical(line, &line_no, err) != DW_DLV_OK) {
+            return -1;
+        }
+
+        /* Адрес инструкции, с которой начинается строка */
+        if (dwarf_lineaddr(line, &line_addr, err) != DW_DLV_OK) {
+            return -1;
+        }
+
+        /* Флаг эпилога и пролога */
+        if (dwarf_prologue_end_etc(line, &prologue_end, &epilogue_begin, &isa,
+                                   &discriminator, err) == -1) {
+            return -1;
+        }
+
+        /*
+         * Находим function_info, для которого текущая инструкция
+         * находится в его диапазоне
+         */
+        FunctionInfo *cur_line_fi = NULL;
+        if (cached_fi != NULL &&
+            FUNC_INFO_CONTAINS_INSTRUCTION(cached_fi, line_addr)) {
+            cur_line_fi = cached_fi;
+        } else {
+            if (!FunctionInfoList_contains(
+                    di->functions, function_info_contains_address_predicate,
+                    (void *) line_addr, &cur_line_fi)) {
+                cur_line_fi = NULL;
+            }
+        }
+
+        if (cur_line_fi == NULL) {
+            /*
+             * Не нашли подходящей функции. Такое может быть если
+             * функция объявлена не нами. Например, взята из
+             * заголовочного файла.
+             */
+            continue;
+        }
+
+        SourceLineInfo sli = {
+            .addr = line_addr,
+            .logical_line_no = line_no,
+        };
+
+        if (cur_line_fi->decl_filename == NULL) {
+            /*
+             * Небольшой хак, т.к. не нашел удобного способа выставить
+             * название файла исходника ранее
+             */
+            cur_line_fi->decl_filename = strdup(src_filename);
+            if (cur_line_fi->decl_filename == NULL) {
+                return -1;
+            }
+        }
+
+        if (SourceLineList_add(cur_line_fi->line_table, &sli) == -1) {
+            return -1;
+        }
+    }
+
+    dwarf_srclines_dealloc_b(line_context);
+    return 0;
+}
+
+static int fill_cu_debug_info(Dwarf_Die cu_die, Dwarf_Error *err,
+                              DebugInfo *di) {
+    /* TODO: создаем внутреннюю структуру, которая хранит значения всех типов, 
+     * а в конце создаем готовый список типов и собираем FunctionInfo переменные
+     */
     int ret = 0;
     int res = 0;
     Dwarf_Die sib_die = 0;
     Dwarf_Half tag = 0;
-
-    FunctionInfoList_init(&di->functions);
 
     do {
         /* Обрабатываем текущий DIE - находим функцию */
@@ -166,17 +309,8 @@ static int is_suffix(const char *str, const char *suffix) {
     return 0;
 }
 
-static int function_info_contains_address_predicate(void *context,
-                                                    FunctionInfo *fi) {
-    Dwarf_Addr address = (Dwarf_Addr) context;
-    if (FUNC_INFO_CONTAINS_INSTRUCTION(fi, address)) {
-        return 1;
-    }
-    return 0;
-}
-
-static int debug_syms_fill_line_table(Dwarf_Debug dbg, Dwarf_Error *err,
-                                      DebugInfo *info) {
+static int debug_syms_fill(Dwarf_Debug dbg, Dwarf_Error *err,
+                           DebugInfo *info) {
     int res;
     Dwarf_Unsigned header_length;
     Dwarf_Half version;
@@ -231,7 +365,7 @@ static int debug_syms_fill_line_table(Dwarf_Debug dbg, Dwarf_Error *err,
         }
 
         if (res == DW_DLV_OK /* != DW_DLV_NO_ENTRY */) {
-            if (fill_functions_info_recurse(cu_child, err, info) == -1) {
+            if (fill_cu_debug_info(cu_child, err, info) == -1) {
                 return -1;
             }
         } else {
@@ -244,139 +378,11 @@ static int debug_syms_fill_line_table(Dwarf_Debug dbg, Dwarf_Error *err,
             continue;
         }
 
-        /*
-         * Заполняем информацию об исходном коде (строки)
-         */
-        Dwarf_Unsigned version;
-        Dwarf_Small table_count;
-        Dwarf_Line_Context line_context;
-
-        if (dwarf_srclines_b(cu_die, &version, &table_count, &line_context,
-                             err) != DW_DLV_OK) {
-            return -1;
-        }
-
-        /*
-         * Работаем только с 1-уровневой таблицей
-         */
-        if (table_count == 0 || table_count == 2) {
-            dwarf_srclines_dealloc_b(line_context);
+        if (fill_cu_line_table(cu_die, err, info) == -1) {
             dwarf_dealloc_die(cu_die);
-            continue;
-        }
-
-        /*
-         * Кэшируем последний function_info, чтобы заново не искать каждый раз.
-         * Т.к. строки идут последовательно и мы скорее всего окажемся в той же
-         * функции
-         */
-        FunctionInfo *cached_fi = NULL;
-
-        /* Храним */
-        SourceLineInfo *prev_sl_info = NULL;
-
-        Dwarf_Line *lines;
-        Dwarf_Signed lines_count;
-
-        int vres = 0;
-
-        if (dwarf_srclines_from_linecontext(
-                line_context, &lines, &lines_count, err) != DW_DLV_OK) {
             return -1;
         }
 
-        for (int i = 0; i < lines_count; ++i) {
-            Dwarf_Line line = lines[i];
-            char *src_filename;
-            Dwarf_Unsigned line_no;
-            Dwarf_Addr line_addr;
-            Dwarf_Bool prologue_end;
-            Dwarf_Bool epilogue_begin;
-            Dwarf_Unsigned isa;
-            Dwarf_Unsigned discriminator;
-            Dwarf_Bool is_statement;
-
-            /* 
-             * Обрабатываем только стейтменты - остальные записи 
-             * могут быть простыми инструкциями внутри стейтмента
-             */
-            if (dwarf_linebeginstatement(line, &is_statement, err) != DW_DLV_OK) {
-                return -1;
-            }
-
-            if (!is_statement) {
-                continue;
-            }
-
-            /* Имя файла с исходным кодом */
-            if (dwarf_linesrc(line, &src_filename, err) != DW_DLV_OK) {
-                return -1;
-            }
-
-            /* Номер строки в файле */
-            if (dwarf_linelogical(line, &line_no, err) != DW_DLV_OK) {
-                return -1;
-            }
-
-            /* Адрес инструкции, с которой начинается строка */
-            if (dwarf_lineaddr(line, &line_addr, err) != DW_DLV_OK) {
-                return -1;
-            }
-
-            /* Флаг эпилога и пролога */
-            if (dwarf_prologue_end_etc(line, &prologue_end, &epilogue_begin,
-                                        &isa, &discriminator, err) == -1) {
-                return -1;
-            }
-
-            /*
-             * Находим function_info, для которого текущая инструкция
-             * находится в его диапазоне
-             */
-            FunctionInfo *cur_line_fi = NULL;
-            if (cached_fi != NULL &&
-                FUNC_INFO_CONTAINS_INSTRUCTION(cached_fi, line_addr)) {
-                cur_line_fi = cached_fi;
-            } else {
-                if (!FunctionInfoList_contains(
-                        info->functions,
-                        function_info_contains_address_predicate,
-                        (void *) line_addr, &cur_line_fi)) {
-                    cur_line_fi = NULL;
-                }
-            }
-
-            if (cur_line_fi == NULL) {
-                /*
-                 * Не нашли подходящей функции. Такое может быть если
-                    * функция объявлена не нами. Например, взята из
-                    * заголовочного файла.
-                    */
-                continue;
-            }
-
-            SourceLineInfo sli = {
-                .addr = line_addr,
-                .logical_line_no = line_no,
-            };
-
-            if (cur_line_fi->decl_filename == NULL) {
-                /*
-                 * Небольшой хак, т.к. не нашел удобного способа выставить
-                    * название файла исходника ранее
-                    */
-                cur_line_fi->decl_filename = strdup(src_filename);
-                if (cur_line_fi->decl_filename == NULL) {
-                    return -1;
-                }
-            }
-
-            if (SourceLineList_add(cur_line_fi->line_table, &sli) == -1) {
-                return -1;
-            }
-        }
-
-        dwarf_srclines_dealloc_b(line_context);
         dwarf_dealloc_die(cu_die);
     }
 
@@ -396,7 +402,12 @@ int debug_syms_init(const char *filename, DebugInfo **debug_info) {
         return -1;
     }
 
-    if (debug_syms_fill_line_table(dbg, &err, info) == -1) {
+    if (FunctionInfoList_init(&info->functions) == -1) {
+        free(info);
+        return -1;
+    }
+
+    if (debug_syms_fill(dbg, &err, info) == -1) {
         dwarf_finish(dbg);
         free(info);
         return -1;

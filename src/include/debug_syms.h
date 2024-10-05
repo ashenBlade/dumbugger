@@ -3,6 +3,54 @@
 
 #include "list.h"
 
+/* Маркер типа */
+typedef enum TypeKind {
+    TypeKindPrimitive,
+    TypeKindPointer,
+    TypeKindStruct
+} TypeKind;
+
+typedef struct BaseType
+{
+    /* Маркер типа */
+    TypeKind kind;
+    /* Название типа */
+    char *name;
+} BaseType;
+
+/* Примитивный тип - int, char, long ... */
+typedef struct PrimitiveType {
+    BaseType base;
+    /* Размер в байтах */
+    int byte_size;
+} PrimitiveType;
+
+/* Указатель на тип */
+typedef struct PointerType {
+    BaseType base;
+    /* Тип, на который указывает указатель */
+    BaseType *type;
+} PointerType;
+
+/* Поле структуры */
+typedef struct StructMember {
+    /* Название поля */
+    char *name;
+    /* Тип поля */
+    BaseType *type;
+    /* Смещение в байтах, относительно начала структуры */
+    int byte_offset;
+} StructMember;
+
+LIST_DEFINE(StructMember, StructMemberList)
+
+/* Структура, класс, объединение */
+typedef struct StructType {
+    BaseType base;
+    /* Поля структуры */
+    StructMemberList *members;
+} StructType;
+
 /*
  * Данные о строке исходного кода
  */
@@ -19,6 +67,15 @@ typedef struct SourceLineInfo {
 
 LIST_DEFINE(SourceLineInfo, SourceLineList)
 
+typedef struct Variable {
+    /* Название переменной */
+    char *name;
+    /* Тип переменной */
+    BaseType *type;
+    /* Смещение от RBP до места хранения переменной */
+    int frame_offset;
+} Variable;
+LIST_DEFINE(Variable, VariableList)
 /* Информация о функции */
 typedef struct FunctionInfo {
     /* Файл в котором объявлена функция. Путь полный */
@@ -31,6 +88,8 @@ typedef struct FunctionInfo {
     long high_pc;
     /* Таблица строк */
     SourceLineList *line_table;
+    /* Переменные, определенные в этой функции */
+    VariableList *variables;
 } FunctionInfo;
 
 LIST_DEFINE(FunctionInfo, FunctionInfoList)
@@ -53,8 +112,8 @@ int debug_syms_get_line_bounds(DebugInfo *state, long addr, long *out_start,
 int debug_syms_get_context(DebugInfo *debug_info, long addr,
                            FunctionInfo **out_finfo,
                            SourceLineInfo **out_slinfo);
-int debug_syms_free(DebugInfo *debug_info);
 
 int funcinfo_get_addr(FunctionInfo *finfo, long *addr);
 
+int debug_syms_free(DebugInfo *debug_info);
 #endif

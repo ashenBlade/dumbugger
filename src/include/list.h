@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <stdbool.h>
 
 #define LIST_DEFINE(type, typename)                                         \
     typedef struct typename {                                               \
