@@ -9,8 +9,14 @@
 #include "list.h"
 #include "debug_syms.h"
 
+/* 
+ * Реализации списков, используемые в интерфейсе
+ */
+
 LIST_DECLARE(SourceLineInfo, SourceLineList)
 LIST_DECLARE(FunctionInfo, FunctionInfoList)
+LIST_DECLARE(Variable, VariableList)
+LIST_DECLARE(StructMember, StructMemberList)
 
 #define FUNC_INFO_CONTAINS_INSTRUCTION(func_info, instr_addr) \
     ((func_info)->low_pc <= (instr_addr) &&                   \
@@ -68,10 +74,190 @@ static int fill_function_info(Dwarf_Die subprog_die, Dwarf_Error *err,
         high_pc = low_pc;
     }
 
+    VariableList *variables;
+    if (VariableList_init(&variables) == -1) {
+        return -1;
+    }
+
+    Dwarf_Die variable_die;
+    res = dwarf_child(subprog_die, &variable_die, err);
+
+    if (res == DW_DLV_OK) {
+        do {
+            Dwarf_Die next_die;
+            Dwarf_Half tag;
+            res = dwarf_tag(variable_die, &tag, err);
+            if (res == DW_DLV_ERROR) {
+                break;
+            }
+
+            if (tag != DW_TAG_variable && tag != DW_TAG_formal_parameter) {
+                goto next_member;
+            }
+
+            Dwarf_Off type_offset;
+            Dwarf_Bool is_info_section;
+            res = dwarf_dietype_offset(variable_die, &type_offset,
+                                       &is_info_section, err);
+
+            if (res == DW_DLV_ERROR) {
+                break;
+            }
+
+            if (res == DW_DLV_NO_ENTRY) {
+                goto next_member;
+            }
+
+            char *name;
+            res = dwarf_diename(variable_die, &name, err);
+            if (res == DW_DLV_ERROR) {
+                break;
+            }
+            if (res == DW_DLV_NO_ENTRY) {
+                goto next_member;
+            }
+            
+            /* Находим расположение переменной относительно начала стека.
+             * Это должна быть операция DW_OP_fbreg с единственным аргументом -
+             * смещение относительно начала фрейма. 
+             * Ищем в атрибуте DW_AT_location.
+             */
+            Dwarf_Attribute location_attr;
+            res = dwarf_attr(variable_die, DW_AT_location, &location_attr, err);
+            if (res == DW_DLV_ERROR) {
+                break;
+            }
+            if (res == DW_DLV_NO_ENTRY) {
+                goto next_member;
+            }
+
+            /* DW_FORM_exprloc */
+            Dwarf_Loc_Head_c head;
+            Dwarf_Unsigned locs_count;
+            res = dwarf_get_loclist_c(location_attr, &head, &locs_count, err);
+            if (res == DW_DLV_ERROR) {
+                break;
+            }
+            if (res == DW_DLV_NO_ENTRY || locs_count != 1) {
+                goto next_member;
+            }
+            /* 
+             * Пока обрабатываем только смещение относительно начала фрейма.
+             * Это должна быть операция DW_OP_fbreg с единственным аргументом -
+             * смещение относительно начала фрейма. 
+             * Ищем в атрибуте 
+             */
+            Dwarf_Small loclist_source = 0;
+            Dwarf_Small lle_value = 0;
+            Dwarf_Unsigned rawlowpc = 0;
+            Dwarf_Unsigned rawhighpc = 0;
+            Dwarf_Bool debug_addr_unavailable = false;
+            Dwarf_Addr low_pc_cooked = 0;
+            Dwarf_Addr high_pc_cooked = 0;
+            Dwarf_Unsigned locexprs_count = 0;
+            Dwarf_Locdesc_c locdesc_entry = 0;
+            Dwarf_Unsigned expr_offset = 0;
+            Dwarf_Unsigned locdesc_offset = 0;
+
+            res = dwarf_get_locdesc_entry_d(head, 0,
+                                            &lle_value,
+                                            &rawlowpc, &rawhighpc,
+                                            &debug_addr_unavailable,
+                                            &low_pc_cooked, &high_pc_cooked,
+                                            &locexprs_count,
+                                            &locdesc_entry,
+                                            &loclist_source,
+                                            &expr_offset,
+                                            &locdesc_offset,
+                                            err);
+            if (res == DW_DLV_ERROR) {
+                dwarf_dealloc_loc_head_c(head);
+                break;
+            }
+            if (res == DW_DLV_NO_ENTRY) {
+                dwarf_dealloc_loc_head_c(head);
+                goto next_member;
+            }
+
+            if (locexprs_count != 1) {
+                dwarf_dealloc_loc_head_c(head);
+                goto next_member;
+            }
+
+            Dwarf_Small operation;
+            Dwarf_Unsigned operand1;
+            Dwarf_Unsigned operand2;
+            Dwarf_Unsigned operand3;
+            Dwarf_Unsigned offset_for_branch;
+            res = dwarf_get_location_op_value_c(locdesc_entry, 0, &operation, 
+                                                &operand1, &operand2, &operand3,
+                                                &offset_for_branch, err);
+            if (res == DW_DLV_ERROR) {
+                dwarf_dealloc_loc_head_c(head);
+                break;
+            }
+            if (res == DW_DLV_NO_ENTRY) {
+                dwarf_dealloc_loc_head_c(head);
+                goto next_member;
+            }
+
+            if (operation != DW_OP_fbreg) {
+                dwarf_dealloc_loc_head_c(head);
+                goto next_member;
+            }
+
+            dwarf_dealloc_loc_head_c(head);
+
+            /* 
+             * Создаем саму переменную 
+             */
+            Variable var;
+            var.name = strdup(name);
+            if (var.name == NULL) {
+                res = DW_DLV_ERROR;
+                break;
+            }
+            /* 
+             * В указателе храним ID самого типа.
+             * Проставим реальный после всех манипуляций.
+             * Сейчас эта информация нам не нужна, к счастью.
+             */
+            var.type = (BaseType *) type_offset;
+            /*
+             * На самом деле, операнд для DW_OP_fbreg - Dwarf_Signed,
+             * но в api это Dwarf_Unsiged.
+             * Сделаю каст на укороченный знаковый int здесь, а не там,
+             * чтобы компилятор не ругался.
+             */
+            var.frame_offset = (int) operand1;
+
+            if (VariableList_add(variables, &var) == -1) {
+                VariableList_free(variables);
+                res = DW_DLV_ERROR;
+                break;
+            }
+
+        next_member:     
+            res = dwarf_siblingof_c(variable_die, &next_die, err);
+            if (res != DW_DLV_OK) {
+                break;
+            }
+
+            dwarf_dealloc_die(variable_die);
+            variable_die = next_die;
+        } while (true);
+
+        dwarf_dealloc_die(variable_die);
+    }
+
+    if (res == DW_DLV_ERROR) {
+        return -1;
+    }
     memset(info, 0, sizeof(FunctionInfo));
     info->name = strdup(name);
     info->low_pc = (long) low_pc;
     info->high_pc = (long) high_pc;
+    info->variables = variables;
     SourceLineList_init(&info->line_table);
     return 0;
 }
@@ -86,7 +272,7 @@ static int function_info_contains_address_predicate(void *context,
 }
 
 static int fill_cu_line_table(Dwarf_Die cu_die, Dwarf_Error *err, DebugInfo *di) {
-    /** Заполняем информацию об исходном коде(строки) */
+    /* Заполняем информацию об исходном коде(строки) */
     Dwarf_Unsigned version;
     Dwarf_Small table_count;
     Dwarf_Line_Context line_context;
@@ -218,7 +404,302 @@ static int fill_cu_line_table(Dwarf_Die cu_die, Dwarf_Error *err, DebugInfo *di)
     return 0;
 }
 
-static int fill_cu_debug_info(Dwarf_Die cu_die, Dwarf_Error *err,
+typedef struct struct_member {
+    char *name;
+    Dwarf_Off offset;
+    Dwarf_Off type_offset;
+} struct_member;
+
+LIST_DEFINE(struct_member, struct_member_list)
+LIST_DECLARE(struct_member, struct_member_list)
+
+typedef struct type_info {
+    /* Тэг типа - DW_TAG_primitive/pointer/structure */
+    Dwarf_Half tag;
+    /* Смещение записи в таблице. Используется как идентификатор */
+    Dwarf_Off offset;
+    /* Название типа */
+    char *name;
+
+    /* Знаковый или нет, если примитив */
+    Dwarf_Bool is_signed;
+
+    /* Размер в байтах, если примитив */
+    Dwarf_Unsigned byte_size;
+
+    /* Тип, на который указывает указатель, если DW_TAG_pointer */
+    Dwarf_Off pointer_type_offset;
+
+    /* Поля структуры, если структура */
+    struct_member_list *members;
+
+    /* 
+     * Созданный тип на основании этого type_info.
+     * Если NULL - еще не создан.
+     */
+    BaseType *build_type;
+    /* 
+     * Данный узел находится в обработке.
+     * Используется во время создания типов 
+     * для предотвращения бесконечной рекурсии.
+     */
+    bool is_processing;
+} type_info;
+
+LIST_DEFINE(type_info, type_list)
+LIST_DECLARE(type_info, type_list)
+
+static int fill_subprogram_die(Dwarf_Die die, Dwarf_Error *err, type_list *types,
+                                DebugInfo *di) {
+    FunctionInfo info;
+    memset(&info, 0, sizeof(FunctionInfo));
+    if (SourceLineList_init(&info.line_table) == -1) {
+        return -1;
+    }
+
+    switch (fill_function_info(die, err, &info)) {
+        case -1:
+            SourceLineList_free(info.line_table);
+            return -1;
+        case 0:
+            /* 
+             * Функция имеет все необходимые данные - добавляем в свой
+             * список 
+             */
+            if (FunctionInfoList_add(di->functions, &info) == -1) {
+                SourceLineList_free(info.line_table);
+                free((void *) info.name);
+                return -1;
+            }
+            return 0;
+        case 1:
+            /* Невалидная функция, возможно, внешняя, поэтому не ошибка */
+            SourceLineList_free(info.line_table);
+            free((void *) info.name);
+            return 0;
+        default:
+            assert(false);
+            return -1;
+    }
+}
+
+static int fill_base_type_die(Dwarf_Die die, Dwarf_Error *err, type_list *types, 
+                              DebugInfo *di) {
+    Dwarf_Off global_offset;
+    Dwarf_Off local_offset;
+    if (dwarf_die_offsets(die, &global_offset, &local_offset, err) != DW_DLV_OK) {
+        return -1;
+    }
+
+    Dwarf_Unsigned byte_size;
+    switch (dwarf_bytesize(die, &byte_size, err) ) {
+        case DW_DLV_ERROR:
+            return -1;
+        case DW_DLV_NO_ENTRY:
+            return 0;
+    }
+
+    char *name;
+    switch (dwarf_diename(die, &name, err)) {
+        case DW_DLV_ERROR:
+            return -1;
+        case DW_DLV_NO_ENTRY:
+            return 0;
+    }
+
+    Dwarf_Attribute encoding_attr;
+    switch (dwarf_attr(die, DW_AT_encoding, &encoding_attr, err)) {
+        case DW_DLV_ERROR:
+            return -1;
+        case DW_DLV_NO_ENTRY:
+            return 0;
+    }
+
+    Dwarf_Signed encoding;
+    if (dwarf_formsdata(encoding_attr, &encoding, err) != DW_DLV_OK) {
+        dwarf_dealloc_attribute(encoding_attr);
+        return 0;
+    }
+    dwarf_dealloc_attribute(encoding_attr);
+
+    type_info type;
+    memset(&type, 0, sizeof(type_info));
+
+    type.name = strdup(name);
+    if (type.name == NULL) {
+        return -1;
+    }
+    type.tag = DW_TAG_base_type;
+    type.offset = global_offset;
+
+    type.byte_size = (int) byte_size;
+    type.is_signed = encoding == DW_ATE_signed | 
+                     encoding == DW_ATE_signed_char;
+
+    type_list_add(types, &type);
+    return 0;
+}
+
+static int fill_pointer_type_die(Dwarf_Die die, Dwarf_Error *err, type_list *types,
+                                 DebugInfo *di) {
+    Dwarf_Off global_offset;
+    Dwarf_Off local_offset;
+    if (dwarf_die_offsets(die, &global_offset, &local_offset, err) !=
+        DW_DLV_OK) {
+        return -1;
+    }
+
+    Dwarf_Off pointed_type;
+    Dwarf_Bool is_debug_info_section;
+    switch (dwarf_dietype_offset(die, &pointed_type, &is_debug_info_section, err)) {
+        case DW_DLV_ERROR:
+            return -1;
+        case DW_DLV_NO_ENTRY:
+            return 0;
+    }
+
+    char *name;
+    switch (dwarf_diename(die, &name, err)) {
+        case DW_DLV_ERROR:
+            return -1;
+        case DW_DLV_NO_ENTRY:
+            return 0;
+    }
+
+    type_info type;
+    memset(&type, 0, sizeof(type_info));
+
+    type.tag = DW_TAG_pointer_type;
+    type.name = strdup(name);
+    if (type.name == NULL) {
+        return -1;
+    }
+    type.offset = global_offset;
+    type.pointer_type_offset = (int) pointed_type;
+
+    return 0;
+}
+
+static int fill_struct_type_die(Dwarf_Die die, Dwarf_Error *err, type_list *types,
+                                DebugInfo *di) {
+    /* Собираем информацию по структуре */
+    Dwarf_Off global_offset;
+    if (dwarf_dieoffset(die, &global_offset, err) !=
+        DW_DLV_OK) {
+        return -1;
+    }
+
+    char *struct_name;
+    switch (dwarf_diename(die, &struct_name, err)) {
+        case DW_DLV_ERROR:
+            return -1;
+        case DW_DLV_NO_ENTRY:
+            return 0;
+    }
+
+    struct_member_list *members;
+    if (struct_member_list_init(&members) == -1) {
+        return -1;
+    }
+
+    Dwarf_Die member_die;
+    int ret = dwarf_child(die, &member_die, err);
+
+    /* Собираем информацию по каждому полю структуры */
+    if (ret == DW_DLV_OK) {
+        Dwarf_Die next_member_die;
+
+        do {
+            /* Обрабатываем только поля структуры */
+            Dwarf_Half tag;
+            if (dwarf_tag(member_die, &tag, err) == DW_DLV_ERROR) {
+                ret = DW_DLV_ERROR;
+                break;
+            }
+
+            if (tag != DW_TAG_member) {
+                goto next_member;
+            }
+
+            /* Смещение DIE поля */
+            Dwarf_Off global_member_offset;
+            ret = dwarf_dieoffset(member_die, &global_member_offset, err);
+            if (ret == DW_DLV_ERROR) {
+                break;
+            }
+
+            /* Название поля */
+            char *member_name;
+            ret = dwarf_diename(member_die, &member_name, err);
+            if (ret == DW_DLV_ERROR) {
+                break;
+            }
+
+            if (ret == DW_DLV_NO_ENTRY) {
+                continue;
+            }
+
+            /* Тип поля */
+            Dwarf_Off member_type;
+            Dwarf_Bool is_info_section;
+            ret = dwarf_dietype_offset(member_die, &member_type,
+                                       &is_info_section, err);
+            if (ret == DW_DLV_ERROR) {
+                break;
+            }
+            if (ret == DW_DLV_NO_ENTRY) {
+                continue;
+            }
+            
+            struct_member member;
+            member.name = strdup(member_name);
+            if (member.name == NULL) {
+                free(member.name);
+                ret = DW_DLV_ERROR;
+                break;
+            }
+            member.offset = global_member_offset;
+            member.type_offset = member_type;
+
+            if (struct_member_list_add(members, &member) == -1) {
+                free(member.name);
+                ret = DW_DLV_ERROR;
+                break;
+            }
+
+        next_member:
+            ret = dwarf_siblingof_c(member_die, &next_member_die, err);
+            if (ret != DW_DLV_OK) {
+                break;
+            }
+            dwarf_dealloc_die(member_die);
+            member_die = next_member_die;
+        } while (true);
+
+        dwarf_dealloc_die(member_die);
+    }
+
+    if (ret == DW_DLV_ERROR) {
+        struct_member_list_free(members);
+        return -1;
+    }
+
+    type_info type;
+    memset(&type, 0, sizeof(type_info));
+
+    type.tag = DW_TAG_pointer_type;
+    type.name = strdup(struct_name);
+    if (type.name == NULL) {
+        struct_member_list_free(members);
+        return -1;
+    }
+    type.offset = global_offset;
+    type.members = members;
+
+    return 0;
+}
+
+static int fill_cu_debug_info(Dwarf_Die cu_die, Dwarf_Error *err, type_list *types,
                               DebugInfo *di) {
     /* TODO: создаем внутреннюю структуру, которая хранит значения всех типов, 
      * а в конце создаем готовый список типов и собираем FunctionInfo переменные
@@ -236,27 +717,24 @@ static int fill_cu_debug_info(Dwarf_Die cu_die, Dwarf_Error *err,
         }
 
         if (tag == DW_TAG_subprogram) {
-            FunctionInfo info;
-            memset(&info, 0, sizeof(FunctionInfo));
-            SourceLineList_init(&info.line_table);
-
-            res = fill_function_info(cu_die, err, &info);
-            if (res == -1) {
+            if (fill_subprogram_die(cu_die, err, types, di) == -1) {
                 ret = -1;
                 break;
             }
-
-            if (res == 0) {
-                /* Функция имеет все необходимые данные - добавляем в свой
-                 * список */
-                if (FunctionInfoList_add(di->functions, &info) == -1) {
-                    ret = -1;
-                    free((void *) info.name);
-                    break;
-                }
-            } else if (res == 1) {
-                /* Невалидная функция */
-                free((void *) info.name);
+        } else if (tag == DW_TAG_base_type) {
+            if (fill_base_type_die(cu_die, err, types, di) == -1) {
+                ret = -1;
+                break;
+            }
+        } else if (tag == DW_TAG_pointer_type) {
+            if (fill_pointer_type_die(cu_die, err, types, di) == -1) {
+                ret = -1;
+                break;
+            }
+        } else if (tag == DW_TAG_structure_type) {
+            if (fill_struct_type_die(cu_die, err, types, di) == -1) {
+                ret = -1;
+                break;
             }
         }
 
@@ -310,7 +788,7 @@ static int is_suffix(const char *str, const char *suffix) {
 }
 
 static int debug_syms_fill(Dwarf_Debug dbg, Dwarf_Error *err,
-                           DebugInfo *info) {
+                           type_list *types, DebugInfo *info) {
     int res;
     Dwarf_Unsigned header_length;
     Dwarf_Half version;
@@ -364,18 +842,18 @@ static int debug_syms_fill(Dwarf_Debug dbg, Dwarf_Error *err,
             return -1;
         }
 
-        if (res == DW_DLV_OK /* != DW_DLV_NO_ENTRY */) {
-            if (fill_cu_debug_info(cu_child, err, info) == -1) {
-                return -1;
-            }
-        } else {
+        if (res != DW_DLV_OK) {
             /*
              * Нет смысла заполнять информацию далее, т.к.
              * текущий CU не найден. Нового ничего не добавим
-             * */
+             */
             dwarf_dealloc_die(cu_child);
             dwarf_dealloc_die(cu_die);
             continue;
+        }
+
+        if (fill_cu_debug_info(cu_child, err, types, info) == -1) {
+            return -1;
         }
 
         if (fill_cu_line_table(cu_die, err, info) == -1) {
@@ -384,6 +862,125 @@ static int debug_syms_fill(Dwarf_Debug dbg, Dwarf_Error *err,
         }
 
         dwarf_dealloc_die(cu_die);
+    }
+
+    return 0;
+}
+
+static int type_info_id_equal_predicate(void *context, type_info *type) {
+    if ((long)context == type->offset) {
+        return 1;
+    }
+    return 0;
+}
+
+static BaseType *get_type(long id, type_list *types) {
+    type_info *type;
+    if (type_list_contains(types, type_info_id_equal_predicate, (void *)id, &type) == 0) {
+        return NULL;
+    }
+
+    if (type->build_type != NULL) {
+        return type->build_type;
+    }
+
+    if (type->is_processing) {
+        /* Для предотвращения рекурсии возвращаем NULL */
+        return NULL;
+    }
+
+    type->is_processing = true;
+
+    BaseType *result = NULL;
+    PrimitiveType *primitive;
+    PointerType *pointer;
+    StructType *structure;
+
+    switch (type->tag) {
+        case DW_TAG_base_type:
+            primitive = malloc(sizeof(PrimitiveType));
+            if (primitive == NULL) {
+                break;
+            }
+            primitive->byte_size = (int) type->byte_size;
+            primitive->is_signed = (bool) type->is_signed;
+            result = (BaseType *)primitive;
+            break;
+        case DW_TAG_pointer_type:
+            pointer = malloc(sizeof(PointerType));
+            if (pointer == NULL) {
+                break;
+            }
+
+            BaseType *pointed_type = get_type((long)type->pointer_type_offset, types);
+            pointer->type = pointed_type;
+            result = (BaseType *)pointer;
+            break;
+        case DW_TAG_structure_type:
+            structure = malloc(sizeof(StructType));
+            if (structure == NULL) {
+                break;
+            }
+            if (StructMemberList_init(&structure->members) == -1) {
+                free(structure);
+                break;
+            }
+            
+            struct_member *member;
+            foreach (member, type->members) {
+                StructMember m;
+                m.name = member->name;
+                m.byte_offset = (int) member->offset;
+                m.type = get_type((long) member->type_offset, types);
+
+                if (StructMemberList_add(structure->members, &m) == -1) {
+                    StructMemberList_free(structure->members);
+                    free(structure);
+                    break;
+                }
+            }
+
+            result = (BaseType *)structure;
+            break;
+        default:
+            assert(false);
+            result = NULL;
+    }
+
+    if (result != NULL) {
+        result->kind = TypeKindPrimitive;
+        result->name = type->name;
+    }
+    type->build_type = result;
+    return result;
+}
+
+static int build_debug_syms(DebugInfo *di, type_list *types) { 
+    /* 
+     * Здесь мы собираем всю информацию о типах,
+     * которые представлены в функциях.
+     * 
+     * В поле type у Variable хранится ID типа, который его представляет.
+     * Сами типы в сыром виде хранятся в списке types.
+     * Проходим по каждой переменной
+     */
+    FunctionInfo *func;
+    foreach (func, di->functions) {
+        Variable *var;
+        foreach (var, func->variables) {
+            var->type = get_type((long)var->type, types);
+        }
+    }
+
+    /* 
+     * Пройдемся 2 раз, когда основные типы уже созданы,
+     * чтобы обработать ситуации рекурсии.
+     */
+    foreach (func, di->functions) {
+        Variable *var;
+        foreach (var, func->variables) {
+            var->type = get_type((long)var->type, types);
+        }
     }
 
     return 0;
@@ -402,12 +999,18 @@ int debug_syms_init(const char *filename, DebugInfo **debug_info) {
         return -1;
     }
 
+    type_list *types;
+    if (type_list_init(&types) == -1) {
+        free(info);
+        return -1;
+    }
+
     if (FunctionInfoList_init(&info->functions) == -1) {
         free(info);
         return -1;
     }
 
-    if (debug_syms_fill(dbg, &err, info) == -1) {
+    if (debug_syms_fill(dbg, &err, types, info) == -1) {
         dwarf_finish(dbg);
         free(info);
         return -1;
@@ -417,6 +1020,13 @@ int debug_syms_init(const char *filename, DebugInfo **debug_info) {
         free(info);
         return -1;
     }
+
+    if (build_debug_syms(info, types) == -1) {
+        type_list_free(types);
+        free(info);
+        return -1;
+    }
+    type_list_free(types);
 
     *debug_info = info;
 

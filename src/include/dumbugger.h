@@ -210,8 +210,13 @@ typedef enum DmbgStatus {
 } DmbgStatus;
 
 /* Получить все переменные объявленные в этой функции */
-int dmbg_get_variables(DumbuggerState *state, char **out_variables,
+int dmbg_get_variables(DumbuggerState *state, char ***out_variables,
                        int *out_count);
+
+/* 
+ * Освободить место, выделенное для имен переменных
+ */
+int dmbg_free_variables(DumbuggerState *state, char **variables, int count);
 
 /* 
  * Получить значение указанной переменной. Значения сохраняются в поле out_values

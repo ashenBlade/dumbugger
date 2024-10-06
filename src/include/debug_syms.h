@@ -1,6 +1,7 @@
 #ifndef DEBUG_SYMS_H
 #define DEBUG_SYMS_H
 
+#include <stdbool.h>
 #include "list.h"
 
 /* Маркер типа */
@@ -23,6 +24,8 @@ typedef struct PrimitiveType {
     BaseType base;
     /* Размер в байтах */
     int byte_size;
+    /* Знаковый или нет */
+    bool is_signed;
 } PrimitiveType;
 
 /* Указатель на тип */
@@ -75,7 +78,9 @@ typedef struct Variable {
     /* Смещение от RBP до места хранения переменной */
     int frame_offset;
 } Variable;
+
 LIST_DEFINE(Variable, VariableList)
+
 /* Информация о функции */
 typedef struct FunctionInfo {
     /* Файл в котором объявлена функция. Путь полный */

@@ -1439,6 +1439,56 @@ int dmbg_get_src_position(DumbuggerState *state, char **filename,
     return 0;
 }
 
+int dmbg_get_variables(DumbuggerState *state, char ***out_variables,
+                       int *out_count) {
+    FunctionInfo *cur_function;
+    long rip;
+    if (get_rip(state, &rip) == -1) {
+        return -1;
+    }
+
+    if (debug_syms_get_function_at_addr(state->debug_info, rip, &cur_function) == 0) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    int length = list_size(cur_function->variables);
+    if (length == 0) {
+        *out_count = 0;
+        *out_variables = NULL;
+        return 0;
+    }
+
+    char **vars = calloc(length, sizeof(char *));
+    int i = 0;
+    Variable *var;
+    foreach (var, cur_function->variables) {
+        vars[i] = strdup(var->name);
+        if (vars[i] == NULL) {
+            for (int j = 0; j < i; ++j) {
+                free(vars[j]);
+            }
+            free(vars);
+            return -1;
+        }
+
+        ++i;
+    }
+
+    *out_count = length;
+    *out_variables = vars;
+
+    return 0;
+}
+
+int dmbg_free_variables(DumbuggerState *state, char **variables, int count) { 
+    for (int i = 0; i < count; ++i) {
+        free(variables[i]);
+    }
+    free(variables);
+    return 0; 
+}
+
 DmbgStatus dmbg_status(DumbuggerState *state) {
     switch (state->state) {
         case PROCESS_STATE_RUNNING:

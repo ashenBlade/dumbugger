@@ -33,6 +33,7 @@ static int print_help_cmd(program_state *state, int argc, const char **argv) {
         "regs set REG VALUE\t- set value of register REG to VALUE\n"
         "disasm [N]\t\t- show next N assembler instructions, 5 by default\n"
         "functions show\t\t- show functions in process \n"
+        "show variables\t\t- show variables defined in current function\n"
         "continue\t\t- continue execution\n"
         "src\t\t\t- show current source line context\n"
         "s | step\t\t- make single source line step\n"
@@ -40,6 +41,36 @@ static int print_help_cmd(program_state *state, int argc, const char **argv) {
         "bp [LOCATION]\t\t- set breakpoint at specified location\n"
         "cont | continue\t- continue execution\n");
     return 0;
+}
+
+static int show_functions_variables_cmd(program_state *state, int argc, 
+                                        const char **argv) {
+    if (argc != 2 || strcmp(argv[1], "variables")) {
+        printf("\"show\" accepts only \"variables\" argument");
+        return 0;
+    }
+
+    char **variables;
+    int count;
+    if (dmbg_get_variables(state->dmbg_state, &variables, &count) == -1) {
+        return -1;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        printf("\t%s\n", variables[i]);
+    }
+
+    if (dmbg_free_variables(state->dmbg_state, variables, count) == -1) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int show_variable_value_cmd(program_state *state, int argc, 
+                                   const char *argv) {
+    /* TODO: показать значение функции, реализовать соответствующую логику */
+    return -1;
 }
 
 static int single_instruction_cmd(program_state *state, int argc,
@@ -447,6 +478,7 @@ static CommandsRegistry *build_commands_registry() {
     CMDREG_ADD("disasm", list_assembler_cmd);
     CMDREG_ADD("stop", stop_running_process_cmd);
     CMDREG_ADD("cont", continue_cmd);
+    CMDREG_ADD("show", show_functions_variables_cmd);
     CMDREG_ADD("continue", continue_cmd);
     CMDREG_ADD("bp", set_breakpoint_cmd);
     CMDREG_ADD("breakpoint", set_breakpoint_cmd);
