@@ -34,6 +34,7 @@ static int print_help_cmd(program_state *state, int argc, const char **argv) {
         "disasm [N]\t\t- show next N assembler instructions, 5 by default\n"
         "functions show\t\t- show functions in process \n"
         "show variables\t\t- show variables defined in current function\n"
+        "value [VARIABLE]\t\t- show value of specified variable\n"
         "continue\t\t- continue execution\n"
         "src\t\t\t- show current source line context\n"
         "s | step\t\t- make single source line step\n"
@@ -68,9 +69,40 @@ static int show_functions_variables_cmd(program_state *state, int argc,
 }
 
 static int show_variable_value_cmd(program_state *state, int argc, 
-                                   const char *argv) {
-    /* TODO: показать значение функции, реализовать соответствующую логику */
-    return -1;
+                                   const char **argv) {
+    if (argc != 2) {
+        printf("\"value\" takes single argument - variable name\n");
+        return 0;
+    }
+
+    char **values;
+    int count;
+    if (dmbg_get_variable_value(state->dmbg_state, argv[1], &values, &count) == -1) {
+        if (errno == ENOENT) {
+            printf("no such variable");
+            return 0;
+        }
+        return -1;
+    }
+
+    /* Не обрабатываю случай - count = 0 */
+    if (count == 1) {
+        /* Примитив */
+        printf("%s = %s\n", argv[1], values[0]);
+    } else if (count == 2) {
+        /* Указатель на примитив */
+        printf("%s = %s\n", argv[1], values[0]);
+        printf("\t* %s\n", values[1]);
+    } else if (count > 2) {
+        /* Структура или указатель на нее */
+        printf("%s = %s\n", argv[1], values[0]);
+        for (int i = 1; i < count; i += 2) {
+            printf("\t%s = %s\n", values[i], values[i + 1]);
+        }
+    }
+
+    dmbg_free_variable_value(state->dmbg_state, values, count);
+    return 0;
 }
 
 static int single_instruction_cmd(program_state *state, int argc,
@@ -140,8 +172,9 @@ static int show_regs_cmd(program_state *state, int argc, const char **argv) {
         "registers:\n"
         "\trdi:\t%llu\n"
         "\trsi:\t%llu\n"
-        "\trdx:\t%llu\n",
-        regs.rdi, regs.rsi, regs.rdx);
+        "\trdx:\t%llu\n"
+        "\trbp:\t%llu\n",
+        regs.rdi, regs.rsi, regs.rdx, regs.rbp);
 
     return 0;
 }
@@ -479,6 +512,7 @@ static CommandsRegistry *build_commands_registry() {
     CMDREG_ADD("stop", stop_running_process_cmd);
     CMDREG_ADD("cont", continue_cmd);
     CMDREG_ADD("show", show_functions_variables_cmd);
+    CMDREG_ADD("value", show_variable_value_cmd);
     CMDREG_ADD("continue", continue_cmd);
     CMDREG_ADD("bp", set_breakpoint_cmd);
     CMDREG_ADD("breakpoint", set_breakpoint_cmd);
@@ -487,6 +521,8 @@ static CommandsRegistry *build_commands_registry() {
     CMDREG_ADD("src", show_src_lines_cmd);
     CMDREG_ADD("s", single_src_line_step_cmd);
     CMDREG_ADD("step", single_src_line_step_cmd);
+    
+#undef CMDREG_ADD
 
     return reg;
 }

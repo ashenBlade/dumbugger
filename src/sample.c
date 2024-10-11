@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 
 typedef struct Sample {
     int value;
@@ -9,6 +10,8 @@ int sample_function(int a) {
     Sample s = {
         .value = 123,
     };
+    Sample *sss = calloc(1, sizeof(Sample));
+    sss->value = 12323;
     int ar[10];
     return lon + 1;
 }

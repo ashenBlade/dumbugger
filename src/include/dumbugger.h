@@ -229,11 +229,17 @@ int dmbg_free_variables(DumbuggerState *state, char **variables, int count);
  *      - out_values[x] - название поля
  *      - out_values[x + 1] - значение поля
  * - Указатель 
- *      - если указатель на примитивный тип, то дальше ничего нет
+ *      - если указатель на примитивный тип, то [1] - разыменованное значение указателя
  *      - если указатель на структуру, то дальше идут поля структуры (как указано выше)
  */
 int dmbg_get_variable_value(DumbuggerState *state, const char *variable,
-                            char **out_values, int *out_count);
+                            char ***out_values, int *out_count);
+
+/* 
+ * Освободить ресурсы выделенные для создания значений переменных
+ * в dmbg_get_variable_value
+ */
+int dmbg_free_variable_value(DumbuggerState *state, char **values, int count);
 
 /*
  * Получить текущий статус отслеживаемого процесса

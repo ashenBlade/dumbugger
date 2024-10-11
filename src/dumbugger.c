@@ -1489,6 +1489,339 @@ int dmbg_free_variables(DumbuggerState *state, char **variables, int count) {
     return 0; 
 }
 
+static int read_simple_value(DumbuggerState *state, BaseType *type, 
+                             long addr, char **value) {
+    if (type->kind == TypeKindStruct) {
+        *value = strdup("");
+        if (*value == NULL) {
+            return -1;
+        }
+        return 0;
+    }
+
+    /* TODO: почему-то всегда читаю значение 0, даже если там не 0 
+     * - попробовать смотреть на выравнивание
+     */
+    // addr &= ~(0x8 - 1);
+    long text;
+    if (peek_text(state, addr, &text) == -1) {
+        return -1;
+    }
+
+    char buf[32];
+    memset(buf, 0, sizeof(buf));
+    const char *formatter;
+    if (type->kind == TypeKindPrimitive) {
+        PrimitiveType *prim = (PrimitiveType *)type;
+        switch (prim->byte_size) {
+            case 1:
+                if (prim->is_signed) {
+                    formatter = "%d";
+                } else {
+                 
+                    formatter = "%u";
+                }
+                break;
+            case 2:
+                if (prim->is_signed) {
+                    formatter = "%hd";
+                } else {
+                    formatter = "%hu";
+                }
+                break;
+            case 4:
+                if (prim->is_signed) {
+                    formatter = "%d";
+                } else {
+                    formatter = "%u";
+                }
+                break;
+            case 8:
+            default:
+                if (prim->is_signed) {
+                    formatter = "%ld";
+                } else {
+                    formatter = "%lu";
+                }
+                break;
+        }
+    } else {
+        assert(type->kind == TypeKindPointer);
+        formatter = "%p";
+    }
+
+    int written = snprintf(buf, sizeof(buf), formatter, text);
+    if (written < 0) {
+        return -1;
+    }
+
+    *value = strndup(buf, written);
+    if (*value == NULL) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int get_struct_values(DumbuggerState *state, long base_addr,
+                             StructType *structure, char **values) {
+    StructMember *member;
+    bool error = false;
+    int i = 1;
+    foreach (member, structure->members) {
+        if (read_simple_value(state, member->type, base_addr + member->byte_offset, &values[i + 1]) == -1) {
+            error = true;
+            break;
+        }
+        values[i] = strdup(member->name);
+        if (values[i] == NULL) {
+            error = true;
+            break;
+        }
+    }
+    
+    if (error) {
+        for (i = 1; i < list_size(structure->members); ++i) {
+            free(values[i]);
+            values[i] = NULL;
+        }
+        return -1;
+    }
+
+    return 0;
+}
+
+static int read_pointer_values(DumbuggerState *state, long addr, 
+                               PointerType *ptr, char ***out_values, int *out_count) {
+    /* 
+     * int *value   - разыменовываем
+     * int **value  - значение самого указателя
+     */
+    assert(ptr->type->kind != TypeKindStruct);
+    
+    /* 
+     * Если тип переменной указатель, то в этом случае
+     * есть только 2 значения: значение указателя и на что он указывает.
+     * Эта функция ответственна за примитивные типы и указатель на указатель.
+     */
+    int count = 2;
+    char **values = calloc(2, sizeof(char *));
+    if (values == NULL) {
+        return -1;
+    }
+
+    /* Прочитаем, что находится на месте указателя */
+    long ptr_value;
+    if (peek_text(state, addr, &ptr_value) == -1) {
+        free(values);
+        return -1;
+    }
+
+    /* И сохраним его сразу, без вызова read_simple_value */
+    char buf[16];
+    memset(buf, 0, sizeof(buf));
+    if (snprintf(buf, sizeof(buf), "0x%p", (void*)ptr_value) < 0) {
+        free(values);
+        return -1;
+    }
+    buf[sizeof(buf) - 1] = '\0';
+
+    values[0] = strdup(buf);
+    if (values[0] == NULL) {
+        free(values);
+        return -1;
+    }
+
+    /* 
+     * После, попытаемся прочитать, что находится уже по указателю
+     */
+    char *ptr_deref_value = NULL;
+    if (ptr_value != 0 && 
+        read_simple_value(state, ptr->type, ptr_value, &ptr_deref_value) == -1 &&
+        errno != EIO) {
+        /* 
+         * Если указатель невалидный, то при попытке 
+            * прочтения мы получим errno == EIO
+            */
+        free(values[0]);
+        free(values);
+        return -1;
+    }
+
+    if (ptr_deref_value == NULL) {
+        ptr_deref_value = strdup("<invalid>");
+        if (ptr_deref_value == NULL) {
+            free(values[0]);
+            free(values);
+            return -1;
+        }
+    }
+
+    values[1] = ptr_deref_value;
+
+    *out_values = values;
+    *out_count = count;
+    return 0;
+}
+
+int dmbg_get_variable_value(DumbuggerState *state, const char *variable,
+                            char ***out_values, int *out_count) {
+    Variable *var;
+    if (debug_syms_get_variable(state->debug_info, variable, &var) == -1) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    if (var->type == NULL) {
+        /* 
+         * Возможно для некоторых переменных типы каким-то образом
+         * не будут известны. Просто скажем, что такой переменной нет -
+         * пока оставлю так
+         */
+        errno = ENOENT;
+        return -1;
+    }
+
+    long rbp;
+    if (get_rbp(state, &rbp) == -1) {
+        return -1;
+    }
+
+    StructType *structure;
+    PointerType *ptr;
+
+    /* В dwarf смещение переменных  */
+    long addr = rbp + var->frame_offset + 16;
+    char **values;
+    int count;
+    switch (var->type->kind) {
+        case TypeKindPrimitive:
+            /* int value */
+            count = 1;
+            values = calloc(1, sizeof(char *));
+            if (values == NULL) {
+                return -1;
+            }
+            if (read_simple_value(state, var->type, addr, values) == -1) {
+                free(values);
+                return -1;
+            }
+            break;
+        case TypeKindPointer:
+            ptr = (PointerType *)var->type;
+            long ptr_value;
+            switch (ptr->type->kind) {
+                case TypeKindPrimitive:
+                case TypeKindPointer:
+                    /*
+                     * int  *value
+                     * int **value
+                     */
+                    if (read_pointer_values(state, addr, ptr, &values, &count) == -1) {
+                        return -1;
+                    }
+                    break;
+                case TypeKindStruct:
+                    /* Struct *value */
+
+                    /* Читаем, что находится по этому указателю */
+                    if (peek_text(state, addr, &ptr_value) == -1) {
+                        return -1;
+                    }
+
+                    char buf[16];
+                    memset(buf, 0, sizeof(buf));
+                    if (snprintf(buf, sizeof(buf), "%p", (void*)ptr_value) < 0) {
+                        return -1;
+                    }
+                    char *ptr_value_str = strdup(buf);
+                    if (ptr_value_str == NULL) {
+                        return -1;
+                    }
+                    
+                    structure = (StructType *)ptr->type;
+                    count = 1 + 2 * list_size(structure->members);
+                    values = calloc(count, sizeof(char *));
+                    if (values == NULL) {
+                        free(ptr_value_str);
+                        return -1;
+                    }
+                    
+                    if (list_size(structure->members) == 0) {
+                        values[0] = ptr_value_str;
+                        break;
+                    }
+
+                    /* 
+                     * Разыменовываем указатель и читаем поля структуры.
+                     * Если указатель невалидный, то просто отдадим
+                     * единственное значение - значение указателя.
+                     */
+                    if (get_struct_values(state, ptr_value, structure, values) == -1) {
+                        if (errno == EIO) {
+                            free(values);
+                            values = calloc(1, sizeof(char *));
+                            if (values == NULL) {
+                                return -1;
+                            }
+
+                            values[0] = ptr_value_str;
+                            count = 1;
+                            break;
+                        }
+
+                        free(ptr_value_str);
+                        free(values);
+                        return -1;
+                    }
+                    break;
+                default:
+                    assert(false);
+                    return -1;
+            }
+            break;
+        case TypeKindStruct:
+            /* Struct value */
+            structure = (StructType *)var->type;
+            count = 1 + 2 * list_size(structure->members);
+            values = calloc(count, sizeof(char *));
+            if (values == NULL) {
+                return -1;
+            }
+
+            values[0] = strdup("");
+            if (values[0] == NULL) {
+                free(values);
+                return -1;
+            }
+
+            if (count > 0) {
+                if (get_struct_values(state, addr, structure, values) == -1) {
+                    free(values[0]);
+                    free(values);
+                    return -1;
+                }
+            }
+            break;
+        default:
+            errno = EINVAL;
+            return -1;
+    }
+
+    *out_count = count;
+    *out_values = values;
+
+    return 0;
+}
+
+int dmbg_free_variable_value(DumbuggerState *state, char **values, int count) {
+    for (int i = 0; i < count; ++i) {
+        free(values[i]);
+    }
+    free(values);
+    return 0;
+}
+
 DmbgStatus dmbg_status(DumbuggerState *state) {
     switch (state->state) {
         case PROCESS_STATE_RUNNING:

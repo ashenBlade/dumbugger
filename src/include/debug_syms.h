@@ -120,5 +120,8 @@ int debug_syms_get_context(DebugInfo *debug_info, long addr,
 
 int funcinfo_get_addr(FunctionInfo *finfo, long *addr);
 
+int debug_syms_get_variable(DebugInfo *debug_info, const char *name, 
+                            Variable **var);
+
 int debug_syms_free(DebugInfo *debug_info);
 #endif

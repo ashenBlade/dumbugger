@@ -406,7 +406,7 @@ static int fill_cu_line_table(Dwarf_Die cu_die, Dwarf_Error *err, DebugInfo *di)
 
 typedef struct struct_member {
     char *name;
-    Dwarf_Off offset;
+    Dwarf_Signed offset;
     Dwarf_Off type_offset;
 } struct_member;
 
@@ -414,7 +414,7 @@ LIST_DEFINE(struct_member, struct_member_list)
 LIST_DECLARE(struct_member, struct_member_list)
 
 typedef struct type_info {
-    /* Тэг типа - DW_TAG_primitive/pointer/structure */
+    /* Тэг типа - DW_TAG_primitive/pointer/structure/const */
     Dwarf_Half tag;
     /* Смещение записи в таблице. Используется как идентификатор */
     Dwarf_Off offset;
@@ -432,6 +432,9 @@ typedef struct type_info {
 
     /* Поля структуры, если структура */
     struct_member_list *members;
+
+    /* Тип, на который указывает этот декоратор ('const', 'typedef' и т.д.) */
+    Dwarf_Off decorated_type_offset;
 
     /* 
      * Созданный тип на основании этого type_info.
@@ -542,24 +545,14 @@ static int fill_base_type_die(Dwarf_Die die, Dwarf_Error *err, type_list *types,
 
 static int fill_pointer_type_die(Dwarf_Die die, Dwarf_Error *err, type_list *types,
                                  DebugInfo *di) {
-    Dwarf_Off global_offset;
-    Dwarf_Off local_offset;
-    if (dwarf_die_offsets(die, &global_offset, &local_offset, err) !=
-        DW_DLV_OK) {
+    Dwarf_Off offset;
+    Dwarf_Bool is_info_section;
+    if (dwarf_dieoffset(die, &offset, err) != DW_DLV_OK) {
         return -1;
     }
 
     Dwarf_Off pointed_type;
-    Dwarf_Bool is_debug_info_section;
-    switch (dwarf_dietype_offset(die, &pointed_type, &is_debug_info_section, err)) {
-        case DW_DLV_ERROR:
-            return -1;
-        case DW_DLV_NO_ENTRY:
-            return 0;
-    }
-
-    char *name;
-    switch (dwarf_diename(die, &name, err)) {
+    switch (dwarf_dietype_offset(die, &pointed_type, &is_info_section, err)) {
         case DW_DLV_ERROR:
             return -1;
         case DW_DLV_NO_ENTRY:
@@ -570,12 +563,14 @@ static int fill_pointer_type_die(Dwarf_Die die, Dwarf_Error *err, type_list *typ
     memset(&type, 0, sizeof(type_info));
 
     type.tag = DW_TAG_pointer_type;
-    type.name = strdup(name);
-    if (type.name == NULL) {
+    /* У указателя нет названия типа */
+    type.name = NULL;
+    type.offset = offset;
+    type.pointer_type_offset = pointed_type;
+
+    if (type_list_add(types, &type) == -1) {
         return -1;
     }
-    type.offset = global_offset;
-    type.pointer_type_offset = (int) pointed_type;
 
     return 0;
 }
@@ -621,11 +616,24 @@ static int fill_struct_type_die(Dwarf_Die die, Dwarf_Error *err, type_list *type
                 goto next_member;
             }
 
-            /* Смещение DIE поля */
-            Dwarf_Off global_member_offset;
-            ret = dwarf_dieoffset(member_die, &global_member_offset, err);
+            /* Смещение DIE поля TODO: неправильно определяю смещение поля */
+            Dwarf_Attribute data_location_attribute;
+            ret = dwarf_attr(member_die, DW_AT_data_member_location, &data_location_attribute, err);
             if (ret == DW_DLV_ERROR) {
                 break;
+            }
+            if (ret == DW_DLV_NO_ENTRY) {
+                continue;
+            }
+
+            Dwarf_Signed member_offset;
+            ret = dwarf_formsdata(data_location_attribute, &member_offset, err);
+            dwarf_dealloc_attribute(data_location_attribute);
+            if (ret == DW_DLV_ERROR) {
+                break;
+            }
+            if (ret == DW_DLV_NO_ENTRY) {
+                continue;
             }
 
             /* Название поля */
@@ -658,7 +666,7 @@ static int fill_struct_type_die(Dwarf_Die die, Dwarf_Error *err, type_list *type
                 ret = DW_DLV_ERROR;
                 break;
             }
-            member.offset = global_member_offset;
+            member.offset = member_offset;
             member.type_offset = member_type;
 
             if (struct_member_list_add(members, &member) == -1) {
@@ -687,7 +695,7 @@ static int fill_struct_type_die(Dwarf_Die die, Dwarf_Error *err, type_list *type
     type_info type;
     memset(&type, 0, sizeof(type_info));
 
-    type.tag = DW_TAG_pointer_type;
+    type.tag = DW_TAG_structure_type;
     type.name = strdup(struct_name);
     if (type.name == NULL) {
         struct_member_list_free(members);
@@ -695,6 +703,88 @@ static int fill_struct_type_die(Dwarf_Die die, Dwarf_Error *err, type_list *type
     }
     type.offset = global_offset;
     type.members = members;
+
+    if (type_list_add(types, &type) == -1) {
+        struct_member_list_free(members);
+        free(struct_name);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int fill_const_type_die(Dwarf_Die die, Dwarf_Error *err, type_list *types,
+                               DebugInfo *di) {
+    Dwarf_Off offset;
+    int ret = dwarf_dieoffset(die, &offset, err);
+    if (ret == DW_DLV_ERROR) {
+        return -1;
+    }
+    if (ret == DW_DLV_NO_ENTRY) {
+        return 0;
+    }
+    
+    Dwarf_Off type_offset;
+    Dwarf_Bool is_info_section;
+    ret = dwarf_dietype_offset(die, &type_offset, &is_info_section, err);
+    if (ret == DW_DLV_ERROR) {
+        return -1;
+    }
+    if (ret == DW_DLV_NO_ENTRY) {
+        return 0;
+    }
+
+    type_info info;
+    memset(&info, 0, sizeof(type_info));
+    info.tag = DW_TAG_const_type;
+    info.offset = offset;
+    info.name = strdup("");
+    info.decorated_type_offset = type_offset;
+    if (info.name == NULL) {
+        return -1;
+    }
+    if (type_list_add(types, &info) == -1) {
+        free(info.name);
+        return -1;
+    }
+    return 0;
+}
+
+static int fill_typedef_die(Dwarf_Die die, Dwarf_Error *err, type_list *types,
+                            DebugInfo *di) {
+    Dwarf_Off offset;
+    int res = dwarf_dieoffset(die, &offset, err);
+    if (res == DW_DLV_ERROR) {
+        return -1;
+    }
+    if (res == DW_DLV_NO_ENTRY) {
+        return 0;
+    }
+
+    Dwarf_Off type;
+    Dwarf_Bool is_info_section;
+    res = dwarf_dietype_offset(die, &type, &is_info_section, err);
+    if (res == DW_DLV_ERROR) {
+        return -1;
+    }
+    if (res == DW_DLV_NO_ENTRY) {
+        return 0;
+    }
+
+    type_info info;
+    memset(&info, 0, sizeof(type_info));
+    info.offset = offset;
+    info.name = strdup("");
+    info.tag = DW_TAG_typedef;
+    info.decorated_type_offset = type;
+    if (info.name == NULL) {
+        return -1;
+    }
+
+    if (type_list_add(types, &info) == -1) {
+        free(info.name);
+        return -1;
+    }
 
     return 0;
 }
@@ -733,6 +823,16 @@ static int fill_cu_debug_info(Dwarf_Die cu_die, Dwarf_Error *err, type_list *typ
             }
         } else if (tag == DW_TAG_structure_type) {
             if (fill_struct_type_die(cu_die, err, types, di) == -1) {
+                ret = -1;
+                break;
+            }
+        } else if (tag == DW_TAG_const_type) {
+            if (fill_const_type_die(cu_die, err, types, di) == -1) {
+                ret = -1;
+                break;
+            }
+        } else if (tag == DW_TAG_typedef) {
+            if (fill_typedef_die(cu_die, err, types, di) == -1) {
                 ret = -1;
                 break;
             }
@@ -895,9 +995,11 @@ static BaseType *get_type(long id, type_list *types) {
     PrimitiveType *primitive;
     PointerType *pointer;
     StructType *structure;
+    TypeKind kind = -1;
 
     switch (type->tag) {
         case DW_TAG_base_type:
+            kind = TypeKindPrimitive;
             primitive = malloc(sizeof(PrimitiveType));
             if (primitive == NULL) {
                 break;
@@ -907,6 +1009,7 @@ static BaseType *get_type(long id, type_list *types) {
             result = (BaseType *)primitive;
             break;
         case DW_TAG_pointer_type:
+            kind = TypeKindPointer;
             pointer = malloc(sizeof(PointerType));
             if (pointer == NULL) {
                 break;
@@ -917,6 +1020,7 @@ static BaseType *get_type(long id, type_list *types) {
             result = (BaseType *)pointer;
             break;
         case DW_TAG_structure_type:
+            kind = TypeKindStruct;
             structure = malloc(sizeof(StructType));
             if (structure == NULL) {
                 break;
@@ -929,9 +1033,15 @@ static BaseType *get_type(long id, type_list *types) {
             struct_member *member;
             foreach (member, type->members) {
                 StructMember m;
+                memset(&m, 0, sizeof(StructMember));
                 m.name = member->name;
                 m.byte_offset = (int) member->offset;
-                m.type = get_type((long) member->type_offset, types);
+                BaseType *member_type = get_type((long) member->type_offset, types);
+                if (member_type != NULL) {
+                    m.type = member_type;
+                } else {
+                    m.type = (void *)member->type_offset;
+                }
 
                 if (StructMemberList_add(structure->members, &m) == -1) {
                     StructMemberList_free(structure->members);
@@ -942,16 +1052,26 @@ static BaseType *get_type(long id, type_list *types) {
 
             result = (BaseType *)structure;
             break;
+        case DW_TAG_const_type:
+        case DW_TAG_typedef:
+            /* Всякие декораторы обрабатываются единообразно */
+            result = get_type(type->decorated_type_offset, types);
+            type->is_processing = false;
+            type->build_type = result;
+            return result;
         default:
             assert(false);
             result = NULL;
+            break;
     }
 
     if (result != NULL) {
-        result->kind = TypeKindPrimitive;
+        assert(kind != -1);
+        result->kind = kind;
         result->name = type->name;
     }
     type->build_type = result;
+    type->is_processing = false;
     return result;
 }
 
@@ -968,7 +1088,10 @@ static int build_debug_syms(DebugInfo *di, type_list *types) {
     foreach (func, di->functions) {
         Variable *var;
         foreach (var, func->variables) {
-            var->type = get_type((long)var->type, types);
+            BaseType *type = get_type((long)var->type, types);
+            if (type != NULL) {
+                var->type = type;
+            }
         }
     }
 
@@ -979,7 +1102,29 @@ static int build_debug_syms(DebugInfo *di, type_list *types) {
     foreach (func, di->functions) {
         Variable *var;
         foreach (var, func->variables) {
-            var->type = get_type((long)var->type, types);
+            /* Небольшой хак, чтобы проверить, что тип был инициализирован */
+            if ((void *) var->type < (void *) 0x10000) {
+                var->type = get_type((long)var->type, types);
+            }
+        }
+    }
+
+    /* Дополнительно проверяем поля структур */
+    type_info *ti;
+    foreach (ti, types) {
+        if (ti->tag != DW_TAG_structure_type) {
+            continue;
+        }
+
+        if (ti->build_type == NULL) {
+            continue;
+        }
+
+        StructMember *member;
+        foreach (member, ((StructType *)ti->build_type)->members) {
+            if ((void *) member->type < (void *) 0x10000) {
+                member->type = get_type((long)member->type, types);
+            }
         }
     }
 
@@ -1179,6 +1324,26 @@ int debug_syms_free(DebugInfo *debug_info) {
 int funcinfo_get_addr(FunctionInfo *finfo, long *addr) {
     *addr = finfo->low_pc;
     return 0;
+}
+
+static int variable_name_equal_predicate(void *context, Variable *var) {
+    if (strcmp((const char *)context, var->name) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+int debug_syms_get_variable(DebugInfo *debug_info, const char *name,
+                            Variable **var) {
+    FunctionInfo *func;
+    foreach (func, debug_info->functions) {
+        if (VariableList_contains(func->variables, variable_name_equal_predicate, 
+                                  (void *)name, var) == 1) {
+            return 1;
+        }
+    }
+    errno = ENOENT;
+    return -1;
 }
 
 int debug_syms_get_function_at_addr(DebugInfo *debug_info, long addr,
