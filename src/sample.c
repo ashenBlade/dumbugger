@@ -12,7 +12,6 @@ int sample_function(int a) {
     };
     Sample *sss = calloc(1, sizeof(Sample));
     sss->value = 12323;
-    int ar[10];
     return lon + 1;
 }
 
