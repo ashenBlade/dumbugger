@@ -1,5 +1,5 @@
 CC := gcc
-CFLAGS := -Iinclude -I../lib/libopcodes/include -I../lib/libdwarf/include -g -O0 -D_GNU_SOURCE
+CFLAGS := -Iinclude -I../lib/libopcodes/include -I../lib/libdwarf/include -g -O0 -D_GNU_SOURCE -fPIE
 
 OBJS = main.
 

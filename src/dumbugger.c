@@ -489,7 +489,7 @@ static int skip_frame_setup(DumbuggerState *state, long rip) {
         return -1;
     }
 
-    if (cur_func->low_pc != rip) {
+    if (cur_func->low_pc + state->load_addr != rip) {
         return 0;
     }
 
@@ -625,7 +625,7 @@ int dmbg_step_in(DumbuggerState *state) {
     if (get_rip(state, &rip) == -1) {
         return -1;
     }
-
+    rip -= state->load_addr;
     /* Находим текущую строку кода и ее функцию */
     long start;
     long end;
@@ -646,6 +646,7 @@ int dmbg_step_in(DumbuggerState *state) {
         if (get_rip(state, &rip) == -1) {
             return -1;
         }
+        rip -= state->load_addr;
 
     } while (start <= rip && rip <= end);
 
@@ -789,15 +790,9 @@ int dmbg_step_over(DumbuggerState *state) {
     }
 
     FunctionInfo *cur_func;
-    switch (
-        debug_syms_get_function_at_addr(state->debug_info, rip, &cur_func)) {
-        case -1:
-            return -1;
-        case 0:
-            errno = ENOENT;
-            return -1;
-        default:
-            break;
+    if (debug_syms_get_function_at_addr(state->debug_info, rip - state->load_addr, &cur_func) == 0) {
+        errno = ENOENT;
+        return -1;
     }
 
     assert(cur_func != NULL);
@@ -811,9 +806,13 @@ int dmbg_step_over(DumbuggerState *state) {
         return -1;
     }
 
+    /* Уберем смещение адреса загрузки для удобной работы с символами отладки */
+    rip -= state->load_addr;
+
     SourceLineInfo *line;
     foreach (line, cur_func->line_table) {
-        /* Пропускаем только текущую строку, так как мы можем уйти выше.
+        /* 
+         * Пропускаем только текущую строку, так как мы можем уйти выше.
          * Например, goto, longjmp, циклы и т.д.
          */
         if (line->addr == rip) {
@@ -821,7 +820,7 @@ int dmbg_step_over(DumbuggerState *state) {
         }
 
         breakpoint_info cur_bp = {
-            .address = line->addr,
+            .address = line->addr + state->load_addr,
             .saved_text = 0,
         };
 
@@ -879,14 +878,14 @@ int dmbg_step_over(DumbuggerState *state) {
                 case 0:
                     break;
                 default:
-                    assert(false &&
-                           "make_single_instruction_step unknown return value");
+                    assert(false);
                     return -1;
             }
 
             if (get_rip(state, &rip) == -1) {
                 return -1;
             }
+            rip -= state->load_addr;
         } while (cur_func->low_pc <= rip && rip <= cur_func->high_pc);
     }
 
@@ -1278,13 +1277,12 @@ int dmbg_set_breakpoint_function(DumbuggerState *state, const char *function) {
     STOPPED_PROCESS_GUARD(state);
 
     if (function == NULL) {
-        errno = EINVAL;
+        errno = ENOENT;
         return -1;
     }
 
     FunctionInfo *func;
-    int res =
-        debug_syms_get_function_by_name(state->debug_info, function, &func);
+    int res = debug_syms_get_function_by_name(state->debug_info, function, &func);
     if (res == -1) {
         return -1;
     }
@@ -1294,7 +1292,7 @@ int dmbg_set_breakpoint_function(DumbuggerState *state, const char *function) {
         return -1;
     }
 
-    return set_breakpoint_at_addr(state, func->low_pc);
+    return set_breakpoint_at_addr(state, state->load_addr + func->low_pc);
 }
 
 int dmbg_set_breakpoint_src_file(DumbuggerState *state, const char *filename,
@@ -1310,16 +1308,13 @@ int dmbg_set_breakpoint_src_file(DumbuggerState *state, const char *filename,
     }
 
     long addr;
-    switch (debug_syms_get_address_at_line(state->debug_info, filename,
-                                           src_line_no, &addr)) {
-        case 0:
-            return set_breakpoint_at_addr(state, addr);
-        case 1:
-            errno = ENOENT;
-            return -1;
-        default /* case -1: */:
-            return -1;
+    if (debug_syms_get_address_at_line(state->debug_info, filename,
+                                       src_line_no, &addr) == 0) {
+        errno = ENOENT;
+        return -1;
     }
+
+    return set_breakpoint_at_addr(state, state->load_addr + addr);
 }
 
 static int remove_breakpoint(DumbuggerState *state, long addr) {
@@ -1430,7 +1425,7 @@ int dmbg_get_src_position(DumbuggerState *state, char **filename,
 
     FunctionInfo *fi;
     SourceLineInfo *sli;
-    if (debug_syms_get_context(state->debug_info, rip, &fi, &sli) == -1) {
+    if (debug_syms_get_context(state->debug_info, rip - state->load_addr, &fi, &sli) == -1) {
         return -1;
     }
 
@@ -1501,10 +1496,6 @@ static int read_simple_value(DumbuggerState *state, BaseType *type,
         return 0;
     }
 
-    /* TODO: почему-то всегда читаю значение 0, даже если там не 0 
-     * - попробовать смотреть на выравнивание
-     */
-    // addr &= ~(0x8 - 1);
     long text;
     if (peek_text(state, addr, &text) == -1) {
         return -1;
@@ -1614,7 +1605,7 @@ static int read_pointer_values(DumbuggerState *state, long addr,
 
     /* Прочитаем, что находится на месте указателя */
     long ptr_value;
-    if (peek_text(state, addr, &ptr_value) == -1) {
+    if (peek_text(state, state->load_addr + addr, &ptr_value) == -1) {
         free(values);
         return -1;
     }
@@ -1674,7 +1665,7 @@ static int get_current_variable(DumbuggerState *state, const char *variable,
     }
 
     FunctionInfo *func;
-    if (debug_syms_get_function_at_addr(state->debug_info, rip, &func) == 0) {
+    if (debug_syms_get_function_at_addr(state->debug_info, rip - state->load_addr, &func) == 0) {
         errno = ENOENT;
         return -1;
     }
@@ -1753,7 +1744,7 @@ int dmbg_get_variable_value(DumbuggerState *state, const char *variable,
                     /* Struct *value */
 
                     /* Читаем, что находится по этому указателю */
-                    if (peek_text(state, addr, &ptr_value) == -1) {
+                    if (peek_text(state, state->load_addr + addr, &ptr_value) == -1) {
                         return -1;
                     }
 

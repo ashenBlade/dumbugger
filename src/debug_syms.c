@@ -1228,10 +1228,10 @@ int debug_syms_get_address_at_line(DebugInfo *debug_info, const char *filename,
         }
 
         *addr = sli->addr;
-        return 0;
+        return 1;
     }
 
-    return 1;
+    return 0;
 }
 
 int debug_syms_get_context(DebugInfo *debug_info, long addr,
@@ -1274,7 +1274,8 @@ int debug_syms_get_context(DebugInfo *debug_info, long addr,
 int debug_syms_get_line_bounds(DebugInfo *state, long addr, long *out_start,
                     long *out_end) {
     FunctionInfo *cur_function;
-    if (debug_syms_get_function_at_addr(state, addr, &cur_function) == -1) {
+    if (debug_syms_get_function_at_addr(state, addr, &cur_function) == 0) {
+        errno = ENOENT;
         return -1;
     }
 
