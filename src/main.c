@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <limits.h>
 
 #include "commands.h"
 #include "dumbugger.h"
@@ -41,6 +42,53 @@ static int print_help_cmd(program_state *state, int argc, const char **argv) {
         "si\t\t\t- make single instruction step\n"
         "bp [LOCATION]\t\t- set breakpoint at specified location\n"
         "cont | continue\t- continue execution\n");
+    return 0;
+}
+
+static int parse_int(const char *str, int *out_value) {
+    errno = 0;
+    long value = strtol(str, NULL, 10);
+    if (errno != 0) {
+        return -1;
+    }
+    if (value < INT_MIN || INT_MAX < value) {
+        errno = ERANGE;
+        return -1;
+    }
+
+    *out_value = (int)value;
+    return 0;
+}
+
+static int get_backtrace_cmd(program_state *state, int argc, 
+                             const char **argv) {
+
+    int max = 10;
+    if (argc == 2) {
+        if (parse_int(argv[1], &max) == -1) {
+            printf("failed to parse number: %s", strerror(errno));
+            return 0;
+        }
+        if (max < 1) {
+            printf("number of backtrace functions must be positive");
+            return 0;
+        }
+    }
+
+    char **bt;
+    int count;
+    if (dmbg_get_backtrace(state->dmbg_state, max, &bt, &count) == -1) {
+        return -1;
+    }
+
+    for (int i = count - 1; i >= 0; --i) {
+        printf("\t%s\n", bt[i]);
+    }
+
+    if (dmbg_backtrace_free(state->dmbg_state, bt, count) == -1) {
+        return -1;
+    }
+
     return 0;
 }
 
@@ -515,6 +563,7 @@ static CommandsRegistry *build_commands_registry() {
     CMDREG_ADD("value", show_variable_value_cmd);
     CMDREG_ADD("continue", continue_cmd);
     CMDREG_ADD("bp", set_breakpoint_cmd);
+    CMDREG_ADD("backtrace", get_backtrace_cmd);
     CMDREG_ADD("breakpoint", set_breakpoint_cmd);
     CMDREG_ADD("functions", functions_cmd);
     CMDREG_ADD("si", single_instruction_cmd);

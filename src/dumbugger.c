@@ -1441,6 +1441,8 @@ int dmbg_get_src_position(DumbuggerState *state, char **filename,
 
 int dmbg_get_variables(DumbuggerState *state, char ***out_variables,
                        int *out_count) {
+    STOPPED_PROCESS_GUARD(state);
+
     FunctionInfo *cur_function;
     long rip;
     if (get_rip(state, &rip) == -1) {
@@ -1666,6 +1668,8 @@ static int read_pointer_values(DumbuggerState *state, long addr,
 
 int dmbg_get_variable_value(DumbuggerState *state, const char *variable,
                             char ***out_values, int *out_count) {
+    STOPPED_PROCESS_GUARD(state);
+                                
     Variable *var;
     if (debug_syms_get_variable(state->debug_info, variable, &var) == -1) {
         errno = ENOENT;
@@ -1822,6 +1826,14 @@ int dmbg_free_variable_value(DumbuggerState *state, char **values, int count) {
     return 0;
 }
 
+int dmbg_backtrace_free(DumbuggerState *state, char **bt, int count) {
+    for (int i = 0; i < count; ++i) {
+        free(bt[i]);
+    }
+    free(bt);
+    return 0;
+}
+
 DmbgStatus dmbg_status(DumbuggerState *state) {
     switch (state->state) {
         case PROCESS_STATE_RUNNING:
@@ -1832,4 +1844,130 @@ DmbgStatus dmbg_status(DumbuggerState *state) {
             return DMBG_STATUS_FINISHED;
     }
     return -1;
+}
+
+static int get_bt_function_at_addr(DumbuggerState *state, long addr, 
+                                   char **out_value) {                  
+    FunctionInfo *func;
+    SourceLineInfo *sli;
+
+    if (debug_syms_get_context(state->debug_info, addr, &func, &sli) == -1) {
+        if (errno == ENOENT) {
+            *out_value = strdup("<unknown>");
+            if (*out_value == NULL) {
+                return -1;
+            }
+            return 0;
+        }
+    }
+    
+    char buf[128];
+    memset(buf, 0, sizeof(buf));
+    int written = snprintf(buf, sizeof(buf), "%s:%ld", func->name, sli->logical_line_no);
+    if (written < 0) {
+        return -1;
+    }
+
+    buf[written] = '\0';
+    *out_value = strdup(buf);
+    if (*out_value == NULL) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int dmbg_get_backtrace(DumbuggerState *state, int max, char ***out_bt,
+                       int *out_count) {
+    STOPPED_PROCESS_GUARD(state);
+    
+    if (max < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (max == 0) {
+        *out_count = 0;
+        *out_bt = NULL;
+        return 0;
+    }
+
+    char **backtrace;
+    int count;
+
+    long rip;
+    if (get_rip(state, &rip) == -1) {
+        return -1;
+    }
+
+    backtrace = calloc(max, sizeof(char *));
+    if (backtrace == NULL) {
+        return -1;
+    }
+
+    if (get_bt_function_at_addr(state, rip, backtrace) == -1) {
+        free(backtrace);
+        return -1;
+    }
+
+    if (max == 1) {
+        *out_count = 1;
+        *out_bt = backtrace;
+        return 0;
+    }
+
+    long rbp;
+    if (get_rbp(state, &rbp) == -1) {
+        free(backtrace[0]);
+        free(backtrace);
+        return -1;
+    }
+
+    count = 1;
+    bool error = false;
+    while (count < max) {
+        /* Сохраняем контекст вызвавшей функции */
+        long ret_addr;
+        if (peek_text(state, rbp + 0x8, &ret_addr) == -1) {
+            error = true;
+            break;
+        }
+
+        if (get_bt_function_at_addr(state, ret_addr, &backtrace[count]) == -1) {
+            error = true;
+            break;
+        }
+
+        /* И переходим к следующей - обновляем текущий RBP */
+        ++count;
+
+        if (count == max) {
+            break;
+        }
+
+        if (peek_text(state, rbp, &rbp) == -1) {
+            error = true;
+            break;
+        }
+
+        /* 
+         * Если полученный RBP - 0, то значит мы дошли 
+         * до первородной функции и дальше ничего нет 
+         */
+        if (rbp == 0) {
+            break;
+        }
+    }
+
+    if (error) {
+        for (int i = 0; i < count; ++i) {
+            free(backtrace[i]);
+        }
+        free(backtrace);
+        return -1;
+    }
+
+    *out_bt = backtrace;
+    *out_count = count;
+    return 0;
 }

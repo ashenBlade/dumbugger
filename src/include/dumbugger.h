@@ -241,6 +241,19 @@ int dmbg_get_variable_value(DumbuggerState *state, const char *variable,
  */
 int dmbg_free_variable_value(DumbuggerState *state, char **values, int count);
 
+/* 
+ * Получить цепочку вызовов до текущей функции.
+ * Возвращается max элементов (возможно меньше).
+ */
+int dmbg_get_backtrace(DumbuggerState *state, int max, char ***out_bt,
+                       int *out_count);
+
+/* 
+ * Освободить ресурсы выделенные для создания 
+ * списка вызовов от dmbg_get_backtrace
+ */
+int dmbg_backtrace_free(DumbuggerState *state, char **bt, int count);
+
 /*
  * Получить текущий статус отслеживаемого процесса
  */
