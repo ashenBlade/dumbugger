@@ -1666,13 +1666,37 @@ static int read_pointer_values(DumbuggerState *state, long addr,
     return 0;
 }
 
+static int get_current_variable(DumbuggerState *state, const char *variable, 
+                                Variable **out_var) {
+    long rip;
+    if (get_rip(state, &rip) == -1) {
+        return -1;
+    }
+
+    FunctionInfo *func;
+    if (debug_syms_get_function_at_addr(state->debug_info, rip, &func) == 0) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    Variable *var;
+    foreach (var, func->variables) {
+        if (strcmp(variable, var->name) == 0) {
+            *out_var = var;
+            return 0;
+        }
+    }
+
+    errno = ENOENT;
+    return -1;
+}
+
 int dmbg_get_variable_value(DumbuggerState *state, const char *variable,
                             char ***out_values, int *out_count) {
     STOPPED_PROCESS_GUARD(state);
-                                
+
     Variable *var;
-    if (debug_syms_get_variable(state->debug_info, variable, &var) == -1) {
-        errno = ENOENT;
+    if (get_current_variable(state, variable, &var) == -1) {
         return -1;
     }
 
