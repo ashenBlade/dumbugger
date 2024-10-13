@@ -1785,7 +1785,7 @@ int dmbg_get_variable_value(DumbuggerState *state, const char *variable,
                     if (ptr_value_str == NULL) {
                         return -1;
                     }
-                    
+
                     structure = (StructType *)ptr->type;
                     count = 1 + 2 * list_size(structure->members);
                     values = calloc(count, sizeof(char *));
@@ -1948,7 +1948,7 @@ int dmbg_get_backtrace(DumbuggerState *state, int max, char ***out_bt,
         return -1;
     }
 
-    if (get_bt_function_at_addr(state, rip, backtrace) == -1) {
+    if (get_bt_function_at_addr(state, rip - state->load_addr, backtrace) == -1) {
         free(backtrace);
         return -1;
     }
@@ -1976,7 +1976,7 @@ int dmbg_get_backtrace(DumbuggerState *state, int max, char ***out_bt,
             break;
         }
 
-        if (get_bt_function_at_addr(state, ret_addr, &backtrace[count]) == -1) {
+        if (get_bt_function_at_addr(state, ret_addr - state->load_addr, &backtrace[count]) == -1) {
             error = true;
             break;
         }
