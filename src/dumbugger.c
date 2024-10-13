@@ -485,11 +485,14 @@ static int skip_frame_setup(DumbuggerState *state, long rip) {
      * инструкцию в DWARF
      */
     FunctionInfo *cur_func;
-    if (debug_syms_get_function_at_addr(state->debug_info, rip, &cur_func) == -1) {
+    if (debug_syms_get_function_at_addr(state->debug_info, rip - state->load_addr, &cur_func) == -1) {
+        if (errno = ENOENT) {
+            return 0;
+        }
         return -1;
     }
 
-    if (cur_func->low_pc + state->load_addr != rip) {
+    if (cur_func->low_pc != rip - state->load_addr) {
         return 0;
     }
 
@@ -612,13 +615,6 @@ int dmbg_step_instruction(DumbuggerState *state) {
 }
 
 int dmbg_step_in(DumbuggerState *state) {
-    /*
-     * Реализация step in:
-     *
-     * 1. Получаем границы текущей строки
-     * 2. Выполняем инструкции поочередно
-     * 3. Если текущая инструкция на старой строке, то п. 2
-     */
     STOPPED_PROCESS_GUARD(state);
 
     long rip;
@@ -640,6 +636,7 @@ int dmbg_step_in(DumbuggerState *state) {
             case -1:
                 return -1;
             case 1:
+                /* Закончили выполнение */
                 return 0;
         }
 
@@ -654,6 +651,91 @@ int dmbg_step_in(DumbuggerState *state) {
         return -1;
     }
 
+    return 0;
+}
+
+static int exec_after_return(DumbuggerState *state) {
+    /* 
+     * После возвращения (return) необходимо выполнить всю строку до конца.
+     * Единственная загвоздка - адрес возврата на другой строке.
+     * Если это так, то мы ничего не должны делать.
+     */
+    long rip;
+    if (get_rip(state, &rip) == -1) {
+        return -1;
+    }
+    rip -= state->load_addr;
+    
+    FunctionInfo *cur_func;
+    SourceLineInfo *cur_line;
+    if (debug_syms_get_context(state->debug_info, rip, &cur_func, &cur_line) == -1) {
+        if (errno == ENOENT) {
+            return 0;
+        }
+        return -1;
+    }
+
+    FunctionInfo *prev_func;
+    SourceLineInfo *prev_line;
+    if (debug_syms_get_context(state->debug_info, rip - 1, &prev_func, &prev_line) == -1) {
+        if (errno == ENOENT) {
+            return 0;
+        }
+        return -1;
+    }
+
+    if (!(SOURCE_LINE_INFO_EQUAL(cur_line, prev_line) && FUNCTION_INFO_EQUAL(cur_func, prev_func))) {
+        /* На разных строках */
+        return 0;
+    }
+
+
+    FunctionInfo *cur_function;
+    if (debug_syms_get_function_at_addr(state->debug_info, rip, &cur_function) == 0) {
+        return 0;
+    }
+    
+    /* Находим следующую строку - нам нужен адрес ее начала */
+    SourceLineInfo *next_line = NULL;
+    SourceLineInfo *sl_info;
+    foreach (sl_info, cur_function->line_table) {
+        if (cur_line == NULL) {
+            if (sl_info->addr <= rip) {
+                cur_line = sl_info;
+            }
+        } else {
+            next_line = sl_info;
+            break;
+        }
+    }
+
+    /* 
+     * Возможно, следующей строки нет, т.к. текущая была последней.
+     * В этом случае, используем последний адрес функции (high_pc) как конец
+     * последней инструкции
+     */
+    long line_end_addr;
+    if (next_line == NULL) {
+        line_end_addr = cur_function->high_pc;
+    } else {
+        line_end_addr = next_line->addr;
+    }
+
+    do {
+        switch (make_single_instruction_step(state)) {
+            case -1:
+                return -1;
+            case 1:
+                return 0;
+            default:
+                break;
+        }
+
+        if (get_rip(state, &rip) == -1) {
+            return -1;
+        }
+        rip -= state->load_addr;
+    } while (cur_line->addr <= rip && rip <= line_end_addr);
     return 0;
 }
 
@@ -715,70 +797,13 @@ int dmbg_step_out(DumbuggerState *state) {
         return -1;
     }
 
-    long rip;
-    if (get_rip(state, &rip) == -1) {
+    /* 
+     * В конце необходимо выполнить строку, на которую вернулись,
+     * так как там может быть код восстанавливающий контекст (регистры и т.д.)
+     */
+    if (exec_after_return(state) == -1) {
         return -1;
     }
-
-    FunctionInfo *cur_function;
-    if (debug_syms_get_function_at_addr(state->debug_info, rip,
-                                        &cur_function) == 0) {
-        /* Функции исходного кода нет */
-        return 0;
-    }
-
-    /* 
-     * Когда вернулись нам необходимо завершить выполнение строки,
-     * на которую вошли - необходимо восстановить контекст (регистры),
-     * иначе они будут равны контексту старой функции.
-     * Для этого просто выполним все инструкции до следующей строки.
-     */
-
-    SourceLineInfo *cur_line = NULL;
-    SourceLineInfo *next_line = NULL;
-    SourceLineInfo *sl_info;
-    foreach (sl_info, cur_function->line_table) {
-        if (cur_line == NULL) {
-            if (sl_info->addr <= rip) {
-                cur_line = sl_info;
-            }
-        } else {
-            next_line = sl_info;
-            break;
-        }
-    }
-
-    if (cur_line == NULL) {
-        /* Не нашли соответствующую строку */
-        return 0;
-    }
-
-    /* 
-     * Возможно, следующей строки нет, т.к. текущая была последней.
-     * В этом случае, используем последний адрес функции (high_pc) как конец
-     * последней инструкции
-     */
-    long line_end_addr;
-    if (next_line == NULL) {
-        line_end_addr = cur_function->high_pc;
-    } else {
-        line_end_addr = next_line->addr;
-    }
-
-    do {
-        switch (make_single_instruction_step(state)) {
-            case -1:
-                return -1;
-            case 1:
-                return 0;
-            default:
-                break;
-        }
-
-        if (get_rip(state, &rip) == -1) {
-            return -1;
-        }
-    } while (cur_line->addr <= rip && rip <= line_end_addr);
 
     return 0;
 }
@@ -797,12 +822,36 @@ int dmbg_step_over(DumbuggerState *state) {
 
     assert(cur_func != NULL);
 
+    /* 
+     * Сначала прочитаем адрес возврата.
+     * На него тоже необходимо поставить точку останова, так как
+     * выполняться может последняя строка.
+     */
+    long rbp;
+    if (get_rbp(state, &rbp) == -1) {
+        return -1;
+    }
+
+    long return_addr;
+    if (peek_text(state, rbp + 0x8, &return_addr) == -1) {
+        return -1;
+    }
+
     /*
      * Мы не знаем куда точно попадем, так как есть условия, goto и др.,
      * поэтому поставим точки останова на все строки до конца функции
      */
     bp_list *set_breakpoints;
     if (bp_list_init(&set_breakpoints) == -1) {
+        return -1;
+    }
+
+    breakpoint_info return_addr_bp = {
+        .address = return_addr,
+        .saved_text = 0,
+    };
+    if (bp_list_add(set_breakpoints, &return_addr_bp) == -1) {
+        bp_list_free(set_breakpoints);
         return -1;
     }
 
@@ -829,69 +878,47 @@ int dmbg_step_over(DumbuggerState *state) {
         }
     }
 
-    /*
-     * Может возникнуть 2 ситуации (есть или нет след. строки):
-     *
-     * - Если есть, то ставим точку останова на след. строке
-     *
-     * - Если ее нет, то скорее всего мы в конце текущей функции. Значит просто
-     *   выполняем инструкции, пока не выйдем из этой функции.
-     */
-
-    if (list_size(set_breakpoints) > 0) {
-        /*
-         * Если след. строка есть, то ставим точку останова на нее (начало)
-         * и продолжаем выполнение
-         */
-        breakpoint_info *bp;
-        foreach (bp, set_breakpoints) {
-            if (set_breakpoint_at_addr(state, bp->address) == -1) {
-                return -1;
-            }
-        }
-
-        if (dmbg_continue(state) == -1) {
+    breakpoint_info *bp;
+    foreach (bp, set_breakpoints) {
+        if (set_breakpoint_at_addr(state, bp->address) == -1) {
             return -1;
         }
-
-        if (dmbg_wait(state) == -1) {
-            return -1;
-        }
-
-        foreach (bp, set_breakpoints) {
-            if (remove_breakpoint(state, bp->address) == -1) {
-                return -1;
-            }
-        }
-
-    } else {
-        /*
-         * Так как следующей строки нет, то доходим до конца текущей функции
-         */
-        do {
-            switch (make_single_instruction_step(state)) {
-                case -1:
-                    return -1;
-                case 1:
-                    /* Закончили выполнение */
-                    return 0;
-                case 0:
-                    break;
-                default:
-                    assert(false);
-                    return -1;
-            }
-
-            if (get_rip(state, &rip) == -1) {
-                return -1;
-            }
-            rip -= state->load_addr;
-        } while (cur_func->low_pc <= rip && rip <= cur_func->high_pc);
     }
 
+    if (dmbg_continue(state) == -1) {
+        return -1;
+    }
+
+    if (dmbg_wait(state) == -1) {
+        return -1;
+    }
+
+    foreach (bp, set_breakpoints) {
+        if (remove_breakpoint(state, bp->address) == -1) {
+            return -1;
+        }
+    }
+    
     if (bp_list_free(set_breakpoints) == -1) {
         return -1;
     }
+
+    /* 
+     * Если после этого шага мы вернулись в вызывающую функцию (return),
+     * то выполним инструкции до конца строки на которую вернулись
+     */
+    if (get_rip(state, &rip) == -1) {
+        return -1;
+    }
+
+    if (rip != return_addr) {
+        return 0;
+    }
+
+    if (exec_after_return(state) == -1) {
+        return -1;
+    }
+
     return 0;
 }
 

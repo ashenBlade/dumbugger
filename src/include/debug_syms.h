@@ -70,6 +70,8 @@ typedef struct SourceLineInfo {
 
 LIST_DEFINE(SourceLineInfo, SourceLineList)
 
+#define SOURCE_LINE_INFO_EQUAL(left, right) ((left)->logical_line_no == (right)->logical_line_no && (left)->addr == (right)->addr)
+
 typedef struct Variable {
     /* Название переменной */
     char *name;
@@ -96,6 +98,8 @@ typedef struct FunctionInfo {
     /* Переменные, определенные в этой функции */
     VariableList *variables;
 } FunctionInfo;
+
+#define FUNCTION_INFO_EQUAL(left, right) (strcmp((left)->name, (right)->name) && strcmp((left)->decl_filename, (right)->decl_filename))
 
 LIST_DEFINE(FunctionInfo, FunctionInfoList)
 
