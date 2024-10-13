@@ -1598,6 +1598,7 @@ static int get_struct_values(DumbuggerState *state, long base_addr,
             error = true;
             break;
         }
+        i += 2;
     }
     
     if (error) {
@@ -1841,7 +1842,7 @@ int dmbg_get_variable_value(DumbuggerState *state, const char *variable,
                 return -1;
             }
 
-            if (count > 0) {
+            if (count > 1) {
                 if (get_struct_values(state, addr, structure, values) == -1) {
                     free(values[0]);
                     free(values);
