@@ -486,7 +486,7 @@ static int skip_frame_setup(DumbuggerState *state, long rip) {
      */
     FunctionInfo *cur_func;
     if (debug_syms_get_function_at_addr(state->debug_info, rip - state->load_addr, &cur_func) == -1) {
-        if (errno = ENOENT) {
+        if (errno == ENOENT) {
             return 0;
         }
         return -1;
@@ -1138,16 +1138,17 @@ static int fprintf_styled_dumbugger_assembly_dump(void *stream,
    put the bytes in, and LENGTH is the number of bytes to read.
    INFO is a pointer to this struct.
    Returns an errno value or 0 for success.  */
-static int read_tracee_memory_func(bfd_vma memaddr, bfd_byte *myaddr,
-                                   unsigned int length,
-                                   struct disassemble_info *dinfo) {
+static int read_child_memory_opcodes_callback(bfd_vma memaddr, bfd_byte *myaddr,
+                                              unsigned int length,
+                                              struct disassemble_info *dinfo) {
     if (length == 0) {
         return 0;
     }
 
     unsigned int left = length;
 
-    /* Каждый раз мы читаем машинное слово, поэтому каждый цикл будем загружать
+    /* 
+     * В каждом цикле читаем по 8 байт (размер слова)
      */
     while (0 < left) {
         long read = ptrace(
@@ -1217,7 +1218,7 @@ int dmbg_disassemble(DumbuggerState *state, int length,
     di.disassembler_options = "att-mnemonic,att";
     disassemble_init_for_target(&di);
 
-    di.read_memory_func = read_tracee_memory_func;
+    di.read_memory_func = read_child_memory_opcodes_callback;
     di.buffer = NULL;
     di.buffer_length = 0;
     di.buffer_vma = 0;
@@ -1270,8 +1271,6 @@ static int dumbugger_state_add_breakpoint(DumbuggerState *state,
 }
 
 static int set_breakpoint_at_addr(DumbuggerState *state, long addr) {
-    assert(state->state == PROCESS_STATE_STOPPED);
-
     long text;
     if (peek_text(state, addr, &text) == -1) {
         return -1;
@@ -1319,7 +1318,7 @@ int dmbg_set_breakpoint_function(DumbuggerState *state, const char *function) {
         return -1;
     }
 
-    return set_breakpoint_at_addr(state, state->load_addr + func->low_pc);
+    return set_breakpoint_at_addr(state, func->low_pc - state->load_addr);
 }
 
 int dmbg_set_breakpoint_src_file(DumbuggerState *state, const char *filename,
@@ -1471,7 +1470,7 @@ int dmbg_get_variables(DumbuggerState *state, char ***out_variables,
         return -1;
     }
 
-    if (debug_syms_get_function_at_addr(state->debug_info, rip, &cur_function) == 0) {
+    if (debug_syms_get_function_at_addr(state->debug_info, rip - state->load_addr, &cur_function) == 0) {
         errno = ENOENT;
         return -1;
     }
@@ -1737,7 +1736,10 @@ int dmbg_get_variable_value(DumbuggerState *state, const char *variable,
     StructType *structure;
     PointerType *ptr;
 
-    /* В dwarf смещение переменных  */
+    /* 
+     * В dwarf смещение переменных начинается с самого начала фрейма, 
+     * учитывая адрес возврата и сохраненный RBP
+     */
     long addr = rbp + var->frame_offset + 16;
     char **values;
     int count;
@@ -1772,7 +1774,7 @@ int dmbg_get_variable_value(DumbuggerState *state, const char *variable,
                     /* Struct *value */
 
                     /* Читаем, что находится по этому указателю */
-                    if (peek_text(state, state->load_addr + addr, &ptr_value) == -1) {
+                    if (peek_text(state, addr, &ptr_value) == -1) {
                         return -1;
                     }
 
@@ -1935,14 +1937,14 @@ int dmbg_get_backtrace(DumbuggerState *state, int max, char ***out_bt,
         return 0;
     }
 
-    char **backtrace;
-    int count;
-
+    /* Сохраняем текущий контекст (функция + строка файла) */
     long rip;
     if (get_rip(state, &rip) == -1) {
         return -1;
     }
 
+    char **backtrace;
+    int count;
     backtrace = calloc(max, sizeof(char *));
     if (backtrace == NULL) {
         return -1;
@@ -1953,12 +1955,14 @@ int dmbg_get_backtrace(DumbuggerState *state, int max, char ***out_bt,
         return -1;
     }
 
+    /* Если запросили только 1 функцию, то возвращаемся сразу */
     if (max == 1) {
         *out_count = 1;
         *out_bt = backtrace;
         return 0;
     }
 
+    /* Начинаем итерироваться по предыдущим фреймам */
     long rbp;
     if (get_rbp(state, &rbp) == -1) {
         free(backtrace[0]);
@@ -1969,7 +1973,7 @@ int dmbg_get_backtrace(DumbuggerState *state, int max, char ***out_bt,
     count = 1;
     bool error = false;
     while (count < max) {
-        /* Сохраняем контекст вызвавшей функции */
+        /* Получаем контекст предыдущей функции по адресу возврата */
         long ret_addr;
         if (peek_text(state, rbp + 0x8, &ret_addr) == -1) {
             error = true;
@@ -1981,7 +1985,7 @@ int dmbg_get_backtrace(DumbuggerState *state, int max, char ***out_bt,
             break;
         }
 
-        /* И переходим к следующей - обновляем текущий RBP */
+        /* Переходим к следующей - читаем предыдущий RBP на основании текущего */
         ++count;
 
         if (count == max) {

@@ -102,6 +102,10 @@ static int show_functions_variables_cmd(program_state *state, int argc,
     char **variables;
     int count;
     if (dmbg_get_variables(state->dmbg_state, &variables, &count) == -1) {
+        if (errno == ENOENT) {
+            printf("Failed to find function\n");
+            return 0;
+        }
         return -1;
     }
 
@@ -394,6 +398,25 @@ static int stop_running_process_cmd(program_state *state, int argc,
     return 0;
 }
 
+static bool try_parse_addr(const char *str, long *addr) {
+    const char *start_addr = str;
+    if (strncmp(start_addr, "0x", 2) == 0 ||
+        strncmp(start_addr, "0X", 2) == 0) {
+        start_addr += 2;
+    }
+
+    size_t len = strlen(start_addr);
+    char *end;
+    long value = strtol(start_addr, &end, 16);
+    if (start_addr + len == end)
+    {
+        *addr = value;
+        return true;
+    }
+
+    return false;
+}
+
 static int set_breakpoint_cmd(program_state *state, int argc,
                               const char **argv) {
     if (argc != 2) {
@@ -404,23 +427,13 @@ static int set_breakpoint_cmd(program_state *state, int argc,
     /*
      * Проверяем, что нам передали сырой адрес
      */
-    {
-        const char *start_addr = location;
-        if (strncmp(start_addr, "0x", 2) == 0 ||
-            strncmp(start_addr, "0X", 2) == 0) {
-            start_addr += 2;
+    long addr;
+    if (try_parse_addr(location, &addr)) {
+        if (dmbg_set_breakpoint_addr(state->dmbg_state, addr) == -1) {
+            printf("error setting breakpoint: %s\n", strerror(errno));
+            return -1;
         }
-
-        errno = 0;
-        char *end_ptr = NULL;
-        long addr = strtol(start_addr, &end_ptr, 16);
-        if (end_ptr != start_addr && errno == 0) {
-            if (dmbg_set_breakpoint_addr(state->dmbg_state, addr) == -1) {
-                printf("error setting breakpoint: %s\n", strerror(errno));
-                return -1;
-            }
-            return 0;
-        }
+        return 0;
     }
 
     /*

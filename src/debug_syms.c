@@ -112,7 +112,6 @@ static int fill_function_info(Dwarf_Die subprog_die, Dwarf_Error *err,
             res = dwarf_diename(variable_die, &name, err);
             if (res == DW_DLV_ERROR) {
                 break;
-            }
             if (res == DW_DLV_NO_ENTRY) {
                 goto next_member;
             }

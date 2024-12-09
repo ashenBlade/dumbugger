@@ -1,24 +1,28 @@
 #include <stdio.h>
-#include <stdlib.h>
 
-typedef struct Sample {
-    int value;
-} Sample;
+typedef struct Data {
+    int value1;
+    long value2;
+} Data;
 
-int sample_function(int a) {
-    int lon = a * 2;
-    Sample s = {
-        .value = 123,
-    };
-    Sample *sss = calloc(1, sizeof(Sample));
-    sss->value = 12323;
-    return lon + 1;
+int do_magic(Data *data) {
+    int temp = data->value1 * 2;
+    if (0 < temp) {
+        data->value2 *= 3;
+    } else {
+        data->value1 -= 1;
+    }
+    
+    return (temp + 2) / 6;
 }
 
 int main(int argc, const char **argv) {
-    int i = argc;
-    ++i;
-    i = sample_function(i);
-    printf("%d", i);
+    Data data = {
+        .value1 = 3,
+        .value2 = 1
+    };
+    if (do_magic(&data)) {
+        printf("value1 is: %ld", data.value2);
+    }
     return 0;
 }
