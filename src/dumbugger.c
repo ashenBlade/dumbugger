@@ -124,15 +124,6 @@ static int get_rip(DumbuggerState *state, long *rip) {
 
     *rip = (long) regs.rip;
     return 0;
-
-    // long result =
-    //     ptrace(PTRACE_PEEKUSER, state->pid, sizeof(long) * REG_RIP, NULL);
-    // if (result == -1 && errno != 0) {
-    //     return -1;
-    // }
-
-    // *rip = result;
-    // return 0;
 }
 
 static int get_rbp(DumbuggerState *state, long *rbp) {
@@ -307,7 +298,7 @@ DumbuggerState *dmbg_run(const char *prog_name, const char **args) {
         return NULL;
     }
 
-    if (WIFEXITED(state->wstatus)) {
+    if (WIFEXITED(state->wstatus) || WIFSIGNALED(state->wstatus)) {
         /*
          * Первая остановка происходит при запуске execvp.
          * Но если это не так и процесс завершился заранее, то код возврата -
